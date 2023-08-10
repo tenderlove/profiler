@@ -806,8 +806,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = All frames
     .title = Do not filter the stack frames
-StackSettings--implementation-script = Script
-    .title = Show only the stack frames related to script execution
+StackSettings--implementation-javascript2 = Ruby
+    .title = Show only the stack frames related to Ruby execution
 StackSettings--implementation-native2 = Native
     .title = Show only the stack frames for native code
 
@@ -817,8 +817,8 @@ StackSettings--stack-implementation-label = Filter stacks:
 StackSettings--use-data-source-label = Data source:
 StackSettings--call-tree-strategy-timing = Timings
     .title = Summarize using sampled stacks of executed code over time
-StackSettings--call-tree-strategy-js-allocations = JavaScript Allocations
-    .title = Summarize using bytes of JavaScript allocated (no de-allocations)
+StackSettings--call-tree-strategy-js-allocations = Ruby Allocations
+    .title = Summarize using bytes of Ruby allocated (no de-allocations)
 StackSettings--call-tree-strategy-native-retained-allocations = Retained Memory
     .title = Summarize using bytes of memory that were allocated, and never freed in the current preview selection
 StackSettings--call-tree-native-allocations = Allocated Memory
