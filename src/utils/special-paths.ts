@@ -84,6 +84,8 @@ const s3PathRegex =
   /^s3:(?<bucket>[^:]*):(?<digest>[0-9a-f]*)\/(?<path>[^:]*):$/;
 const cargoPathRegex =
   /^cargo:(?<registry>[^:]*):(?<crate>[^/]+)-(?<version>[0-9]+\.[0-9]+\.[0-9]+):(?<path>[^:]*)$/;
+const localhostPathRegex = new RegExp(
+  "^(?<host>" + PROFILER_SERVER_ORIGIN + ")\/source(?<path>.*)$");
 
 export function parseFileNameFromSymbolication(
   file: string
@@ -130,6 +132,16 @@ export function parseFileNameFromSymbolication(
     };
   }
 
+  const localhostMatch = localhostPathRegex.exec(file);
+  if (localhostMatch !== null && localhostMatch.groups) {
+    const { host, path } = localhostMatch.groups;
+    return {
+      type: 'localhost',
+      host: host + '/source',
+      path,
+    };
+  }
+
   // At this point, it could be a local path (if this is a native function), or
   // it could be an http/https/chrome URL (for JavaScript code).
   return {
@@ -155,6 +167,13 @@ export function getDownloadRecipeForSourceFile(
       return {
         type: 'CORS_ENABLED_SINGLE_FILE',
         url: `https://${repo}/raw-file/${rev}/${path}`,
+      };
+    }
+    case 'localhost': {
+      const { host, path } = parsedFile;
+      return {
+        type: 'CORS_ENABLED_SINGLE_FILE',
+        url: `${host}${path}`,
       };
     }
     case 'git': {
