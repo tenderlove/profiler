@@ -5,16 +5,16 @@ require "json"
 require "cgi"
 
 root = File.expand_path File.join(__dir__, "..")
-http_root = File.expand_path File.join(__dir__, "..", "dist")
+HTTP_ROOT = File.expand_path File.join(__dir__, "..", "dist")
 
 # Grab the port from the JS constants
 line = File.readlines(File.join(root, "src/app-logic/constants.js")).grep(/^export const SYMBOL_SERVER_URL/).first
 PORT = line[/(?<=localhost:)\d+/].to_i
 
 server = WEBrick::HTTPServer.new :Port => PORT,
-  :DocumentRoot => http_root,
+  :DocumentRoot => HTTP_ROOT,
   :StartCallback => lambda {
-    should_get = "http://localhost:5252/from-url/" + CGI.escape("http://localhost:5252/profile")
+    should_get = "http://localhost:#{PORT}/from-url/" + CGI.escape("http://localhost:#{PORT}/profile")
     system("open #{should_get}")
   }
 
@@ -42,7 +42,7 @@ class GetIndex < WEBrick::HTTPServlet::AbstractServlet
   def do_GET request, response
     response.status = 200
     response['Content-Type'] = 'text/html'
-    response.body = File.binread("dist/index.html")
+    response.body = File.binread(File.join(HTTP_ROOT, "index.html"))
   end
 end
 
