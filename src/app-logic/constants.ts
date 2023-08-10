@@ -104,13 +104,13 @@ export const GOOGLE_STORAGE_BUCKET = 'profile-store';
 // profiles and manage shortlinks.
 
 // This is the production server:
-export const PROFILER_SERVER_ORIGIN = 'https://api.profiler.firefox.com';
+// export const PROFILER_SERVER_ORIGIN = 'https://api.profiler.firefox.com';
 
 // This is the deployment from the main branch:
 // export const PROFILER_SERVER_ORIGIN = 'https://dev.firefoxprofiler.nonprod.cloudops.mozgcp.net';
 
 // This is your local server:
-// export const PROFILER_SERVER_ORIGIN = 'http://localhost:5252';
+export const PROFILER_SERVER_ORIGIN = 'http://localhost:5252';
 
 // SYMBOL_SERVER_URL
 // -----------------
@@ -121,7 +121,7 @@ export const PROFILER_SERVER_ORIGIN = 'https://api.profiler.firefox.com';
 // [1] https://github.com/mstange/profiler-symbol-server/
 
 // This is the default server.
-export const SYMBOL_SERVER_URL = 'https://symbolication.services.mozilla.com';
+export const SYMBOL_SERVER_URL = 'https://localhost:5252';
 
 // See the MarkerPhase type for more information.
 export const INSTANT: MarkerPhase = 0;
