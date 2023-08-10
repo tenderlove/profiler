@@ -1,0 +1,87 @@
+#!/usr/bin/env ruby -w
+
+require "webrick"
+require "json"
+require "cgi"
+
+root = File.expand_path File.join(__dir__, "..")
+http_root = File.expand_path File.join(__dir__, "..", "dist")
+
+# Grab the port from the JS constants
+line = File.readlines(File.join(root, "src/app-logic/constants.js")).grep(/^export const SYMBOL_SERVER_URL/).first
+PORT = line[/(?<=localhost:)\d+/].to_i
+
+server = WEBrick::HTTPServer.new :Port => PORT,
+  :DocumentRoot => http_root,
+  :StartCallback => lambda {
+    should_get = "http://localhost:5252/from-url/" + CGI.escape("http://localhost:5252/profile")
+    system("open #{should_get}")
+  }
+
+class Source < WEBrick::HTTPServlet::AbstractServlet
+  def initialize server, valid_files
+    super(server)
+    @valid_files = valid_files
+  end
+
+  def do_GET request, response
+    file = request.path[/(?<=^\/source).*/]
+    if @valid_files.include? file
+      response.status = 200
+      response['Content-Type'] = 'text/plain'
+      response.body = File.binread(file)
+    else
+      response.status = 404
+      response['Content-Type'] = 'text/plain'
+      response.body = "Not Found"
+    end
+  end
+end
+
+class GetIndex < WEBrick::HTTPServlet::AbstractServlet
+  def do_GET request, response
+    response.status = 200
+    response['Content-Type'] = 'text/html'
+    response.body = File.binread("dist/index.html")
+  end
+end
+
+class Profile < WEBrick::HTTPServlet::AbstractServlet
+  def initialize server, profile, parsed_profile
+    super(server)
+    @profile = profile
+    @parsed_profile = parsed_profile
+  end
+
+  def do_GET request, response
+    response.status = 200
+    response['Content-Type'] = 'text/html'
+    response.body = JSON.dump(@parsed_profile)
+  end
+end
+
+trap 'INT' do server.shutdown end
+
+server.mount "/from-url", GetIndex
+
+profile = ARGV[0]
+if profile
+  valid_files = Set.new
+  full_path = File.expand_path profile
+  parsed_file = JSON.parse File.read full_path
+  parsed_file["threads"].each do |thread|
+    thread["stringArray"].map! do |str|
+      if str.start_with?("/") && File.exist?(str)
+        valid_files << str
+        "http://localhost:#{PORT}/source#{str}"
+      else
+        str
+      end
+    end
+  end
+
+  server.mount "/profile", Profile, full_path, parsed_file
+  server.mount "/source", Source, valid_files
+end
+
+server.start
