@@ -480,7 +480,7 @@ export class TooltipCallNode extends React.PureComponent<Props> {
         stackTypeLabel = 'Native';
         break;
       case 'js':
-        stackTypeLabel = 'JavaScript';
+        stackTypeLabel = 'Ruby';
         break;
       case 'unsymbolicated':
         stackTypeLabel = thread.funcTable.isJS[funcIndex]
