@@ -7,9 +7,9 @@ require "cgi"
 root = File.expand_path File.join(__dir__, "..")
 HTTP_ROOT = File.expand_path File.join(__dir__, "..", "dist")
 
-# Grab the port from the JS constants
-line = File.readlines(File.join(root, "src/app-logic/constants.js")).grep(/^export const SYMBOL_SERVER_URL/).first
-PORT = line[/(?<=localhost:)\d+/].to_i
+# This came from src/app-logic/constants.js
+# export const PROFILER_SERVER_ORIGIN = 'http://localhost:5252';
+PORT = 5252
 
 server = WEBrick::HTTPServer.new :Port => PORT,
   :DocumentRoot => HTTP_ROOT,
