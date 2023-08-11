@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name        = "profile-viewer"
-  s.version     = "0.1.0"
+  s.version     = "0.0.0"
   s.licenses    = ["MPL-2.0"]
   s.summary     = "Ruby Gem that packages the Mozilla Profiler"
   s.description = "This gem packages the Mozilla Profiler so that you can run it locally"
