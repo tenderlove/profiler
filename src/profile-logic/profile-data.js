@@ -384,6 +384,7 @@ export type JsImplementation =
   | 'blinterp'
   | 'baseline'
   | 'ion'
+  | 'yjit'
   | 'unknown';
 export type StackImplementation = 'native' | JsImplementation;
 export type BreakdownByImplementation = { [StackImplementation]: Milliseconds };
@@ -577,6 +578,7 @@ export function getTimingsForCallNodeIndex(
       case 'baseline':
       case 'blinterp':
       case 'ion':
+      case 'yjit':
         return jsImplementation;
       default:
         return 'unknown';
@@ -2623,11 +2625,12 @@ export function getFriendlyStackTypeName(
 ): string {
   switch (implementation) {
     case 'interpreter':
-      return 'JS interpreter';
+      return 'Ruby interpreter';
     case 'blinterp':
     case 'baseline':
     case 'ion':
-      return `JS JIT (${implementation})`;
+    case 'yjit':
+      return `Ruby JIT (${implementation})`;
     case 'native':
       return 'Native code';
     case 'unknown':

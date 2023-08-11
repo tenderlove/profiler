@@ -94,6 +94,7 @@ class ImplementationBreakdown extends React.PureComponent<ImplementationBreakdow
     'native',
     'interpreter',
     'blinterp',
+    'yjit',
     'baseline',
     'ion',
     'unknown',
