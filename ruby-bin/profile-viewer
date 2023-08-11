@@ -4,7 +4,6 @@ require "webrick"
 require "json"
 require "cgi"
 
-root = File.expand_path File.join(__dir__, "..")
 HTTP_ROOT = File.expand_path File.join(__dir__, "..", "dist")
 
 # This came from src/app-logic/constants.js
