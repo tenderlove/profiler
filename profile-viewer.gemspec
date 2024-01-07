@@ -14,4 +14,5 @@ Gem::Specification.new do |s|
   s.executables = ["profile-viewer"]
   s.homepage    = "https://rubygems.org/gems/example"
   s.metadata    = { "source_code_uri" => "https://github.com/tenderlove/profiler/tree/ruby" }
+  s.add_runtime_dependency 'webrick'
 end
