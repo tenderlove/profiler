@@ -11,7 +11,7 @@ import { InnerNavigationLink } from 'firefox-profiler/components/shared/InnerNav
 import { ListOfPublishedProfiles } from './ListOfPublishedProfiles';
 
 import explicitConnect from 'firefox-profiler/utils/connect';
-import PerfScreenshot from 'firefox-profiler-res/img/jpg/perf-screenshot-2021-05-06.jpg';
+import PerfScreenshot from 'firefox-profiler-res/img/jpg/perf-screenshot-2024-02-29.png';
 import FirefoxPopupScreenshot from 'firefox-profiler-res/img/jpg/firefox-profiler-button-2021-05-06.jpg';
 import {
   retrieveProfileFromFile,
