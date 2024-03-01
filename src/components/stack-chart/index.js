@@ -38,7 +38,7 @@ import {
   changeMouseTimePosition,
 } from '../../actions/profile-view';
 
-import { getCallNodePathFromIndex } from '../../profile-logic/profile-data';
+import { getBottomBoxInfoForCallNode } from '../../profile-logic/profile-data';
 
 import type {
   Thread,
@@ -59,8 +59,6 @@ import type {
   Page,
 } from 'firefox-profiler/types';
 
-import type { CallTree } from 'firefox-profiler/profile-logic/call-tree';
-
 import type { ConnectedProps } from '../../utils/connect';
 
 import './index.css';
@@ -71,13 +69,12 @@ type StateProps = {|
   +thread: Thread,
   +weightType: WeightType,
   +innerWindowIDToPageMap: Map<InnerWindowID, Page> | null,
-  +maxStackDepth: number,
+  +maxStackDepthPlusOne: number,
   +combinedTimingRows: CombinedTimingRows,
   +timeRange: StartEndRange,
   +interval: Milliseconds,
   +previewSelection: PreviewSelection,
   +threadsKey: ThreadsKey,
-  +callTree: CallTree,
   +callNodeInfo: CallNodeInfo,
   +categories: CategoryList,
   +selectedCallNodeIndex: IndexIntoCallNodeTable | null,
@@ -122,7 +119,7 @@ class StackChartImpl extends React.PureComponent<Props> {
     const { callNodeInfo, threadsKey, changeSelectedCallNode } = this.props;
     changeSelectedCallNode(
       threadsKey,
-      getCallNodePathFromIndex(callNodeIndex, callNodeInfo.callNodeTable)
+      callNodeInfo.getCallNodePathFromIndex(callNodeIndex)
     );
   };
 
@@ -131,7 +128,7 @@ class StackChartImpl extends React.PureComponent<Props> {
 
     changeRightClickedCallNode(
       threadsKey,
-      getCallNodePathFromIndex(callNodeIndex, callNodeInfo.callNodeTable)
+      callNodeInfo.getCallNodePathFromIndex(callNodeIndex)
     );
   };
 
@@ -150,7 +147,8 @@ class StackChartImpl extends React.PureComponent<Props> {
   _handleKeyDown = (event: SyntheticKeyboardEvent<HTMLElement>) => {
     const {
       threadsKey,
-      callTree,
+      thread,
+      callNodeInfo,
       selectedCallNodeIndex,
       rightClickedCallNodeIndex,
       handleCallNodeTransformShortcut,
@@ -166,7 +164,11 @@ class StackChartImpl extends React.PureComponent<Props> {
     }
 
     if (event.key === 'Enter') {
-      const bottomBoxInfo = callTree.getBottomBoxInfoForCallNode(nodeIndex);
+      const bottomBoxInfo = getBottomBoxInfoForCallNode(
+        nodeIndex,
+        callNodeInfo,
+        thread
+      );
       updateBottomBoxContentsAndMaybeOpen('stack-chart', bottomBoxInfo);
       return;
     }
@@ -177,12 +179,9 @@ class StackChartImpl extends React.PureComponent<Props> {
   _onCopy = (event: ClipboardEvent) => {
     if (document.activeElement === this._viewport) {
       event.preventDefault();
-      const {
-        callNodeInfo: { callNodeTable },
-        selectedCallNodeIndex,
-        thread,
-      } = this.props;
+      const { callNodeInfo, selectedCallNodeIndex, thread } = this.props;
       if (selectedCallNodeIndex !== null) {
+        const callNodeTable = callNodeInfo.getCallNodeTable();
         const funcIndex = callNodeTable.func[selectedCallNodeIndex];
         const funcName = thread.stringTable.getString(
           thread.funcTable.name[funcIndex]
@@ -205,7 +204,7 @@ class StackChartImpl extends React.PureComponent<Props> {
     const {
       thread,
       threadsKey,
-      maxStackDepth,
+      maxStackDepthPlusOne,
       combinedTimingRows,
       timeRange,
       interval,
@@ -224,7 +223,7 @@ class StackChartImpl extends React.PureComponent<Props> {
       displayStackType,
     } = this.props;
 
-    const maxViewportHeight = maxStackDepth * STACK_FRAME_HEIGHT;
+    const maxViewportHeight = maxStackDepthPlusOne * STACK_FRAME_HEIGHT;
 
     return (
       <div
@@ -233,9 +232,9 @@ class StackChartImpl extends React.PureComponent<Props> {
         role="tabpanel"
         aria-labelledby="stack-chart-tab-button"
       >
-        <StackSettings />
+        <StackSettings hideInvertCallstack={true} />
         <TransformNavigator />
-        {maxStackDepth === 0 && userTimings.length === 0 ? (
+        {maxStackDepthPlusOne === 0 && userTimings.length === 0 ? (
           <StackChartEmptyReasons />
         ) : (
           <ContextMenuTrigger
@@ -301,13 +300,13 @@ export const StackChart = explicitConnect<{||}, StateProps, DispatchProps>({
       thread: selectedThreadSelectors.getFilteredThread(state),
       // Use the raw WeightType here, as the stack chart does not use the call tree
       weightType: selectedThreadSelectors.getSamplesWeightType(state),
-      maxStackDepth: selectedThreadSelectors.getFilteredCallNodeMaxDepth(state),
+      maxStackDepthPlusOne:
+        selectedThreadSelectors.getFilteredCallNodeMaxDepthPlusOne(state),
       combinedTimingRows,
       timeRange: getCommittedRange(state),
       interval: getProfileInterval(state),
       previewSelection: getPreviewSelection(state),
       threadsKey: getSelectedThreadsKey(state),
-      callTree: selectedThreadSelectors.getCallTree(state),
       callNodeInfo: selectedThreadSelectors.getCallNodeInfo(state),
       categories: getCategories(state),
       selectedCallNodeIndex:
