@@ -13,14 +13,14 @@
 
 -firefox-brand-name = Firefox
 -firefox-android-brand-name = Firefox for Android
--profiler-brand-name = Firefox Profiler
+-profiler-brand-name = Vernier Profiler
 -profiler-brand-short-name = Profiler
 -firefox-nightly-brand-name = Firefox Nightly
 
 ## AppHeader
 ## This is used at the top of the homepage and other content pages.
 
-AppHeader--app-header = <header>{ -profiler-brand-name }</header> — <subheader>Web app for { -firefox-brand-name } performance analysis</subheader>
+AppHeader--app-header = <header>{ -profiler-brand-name }</header> — <subheader>Web app for Ruby performance analysis</subheader>
 AppHeader--github-icon =
     .title = Go to our Git repository (this opens in a new window)
 

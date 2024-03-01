@@ -553,40 +553,11 @@ class HomeImpl extends React.PureComponent<HomeProps, HomeState> {
                 }
               />
 
-              <Localized
-                id="Home--load-files-from-other-tools2"
-                elems={{
-                  perf: (
-                    <a href="https://profiler.firefox.com/docs/#/./guide-perf-profiling" />
-                  ),
-                  simpleperf: (
-                    <a href="https://profiler.firefox.com/docs/#/./guide-android-profiling" />
-                  ),
-                  androidstudio: (
-                    <a href="https://developer.android.com/studio/profile/cpu-profiler" />
-                  ),
-                  dhat: (
-                    <a href="https://valgrind.org/docs/manual/dh-manual.html" />
-                  ),
-                  write: (
-                    <a href="https://github.com/firefox-devtools/profiler/blob/main/docs-developer/custom-importer.md" />
-                  ),
-                  traceevent: (
-                    <a href="https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview" />
-                  ),
-                }}
-              >
-                <p>
-                  The Firefox Profiler can also import profiles from other
-                  profilers, such as <perf>Linux perf</perf>,
-                  <simpleperf>Android SimplePerf</simpleperf>, the Chrome
-                  performance panel,{' '}
-                  <androidstudio>Android Studio</androidstudio>, or any file
-                  using the <dhat>dhat format</dhat> or{' '}
-                  <traceevent>Google’s Trace Event Format</traceevent>.{' '}
-                  <write>Learn how to write your own importer</write>.
-                </p>
-              </Localized>
+              <p>
+                This web interface is just a few modifications on top of the
+                <a href="https://profiler.firefox.com/">Firefox profiler</a> to adapt better to Ruby profiling.
+                Vernier profiles are compatble with either tool.
+              </p>
 
               <Localized
                 id="Home--compare-recordings-info"

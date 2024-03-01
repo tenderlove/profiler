@@ -35,18 +35,18 @@ export class AppHeader extends React.PureComponent<{||}> {
           >
             <span className="appHeaderSlogan">
               <InnerNavigationLink dataSource="none" className="appHeaderLink">
-                Firefox Profiler
+                Vernier Profiler
               </InnerNavigationLink>{' '}
               –{' '}
               <span className="appHeaderSubtext">
-                Web app for Firefox performance analysis
+                Web app for Ruby performance analysis
               </span>
             </span>
           </Localized>
           <Localized id="AppHeader--github-icon" attrs={{ title: true }}>
             <a
               className="appHeaderGithubIcon"
-              href="https://github.com/firefox-devtools/profiler"
+              href="https://github.com/jhawthorn/vernier"
               target="_blank"
               rel="noopener noreferrer"
               title="Go to our Git repository (this opens in a new window)"
