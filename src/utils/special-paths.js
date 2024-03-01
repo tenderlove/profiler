@@ -30,6 +30,11 @@ export type ParsedFileNameFromSymbolication =
       crate: string,
       version: string,
       path: string,
+    |}
+  | {|
+      type: 'gem',
+      gem: string,
+      path: string,
     |};
 
 // Describes how to obtain a source file from the web.
@@ -89,6 +94,8 @@ const cargoPathRegex =
   /^cargo:(?<registry>[^:]*):(?<crate>[^/]+)-(?<version>[0-9]+\.[0-9]+\.[0-9]+):(?<path>[^:]*)$/;
 const localhostPathRegex = new RegExp(
   "^(?<host>" + PROFILER_SERVER_ORIGIN + ")\/source(?<path>.*)$");
+const gemPathRegex =
+  /^gem:(?<gem>[A-Za-z0-9\-_\.]+):(?<path>[^:]*)$/;
 
 export function parseFileNameFromSymbolication(
   file: string
@@ -132,6 +139,16 @@ export function parseFileNameFromSymbolication(
       // the call tree, and this makes it clear which crate the file is from.
       // This is also the path inside the package tar on crates.io.
       path: `${crate}-${version}/${path}`,
+    };
+  }
+
+  const gemMatch = gemPathRegex.exec(file);
+  if (gemMatch !== null && gemMatch.groups) {
+    const { gem, path } = gemMatch.groups;
+    return {
+      type: 'gem',
+      gem,
+      path,
     };
   }
 
@@ -227,6 +244,13 @@ export function getDownloadRecipeForSourceFile(
         type: 'CORS_ENABLED_ARCHIVE',
         archiveUrl: `https://crates.io/api/v1/crates/${crate}/${version}/download`,
         pathInArchive: path,
+      };
+    }
+    case 'gem': {
+      const { gem, path } = parsedFile;
+      return {
+        type: 'CORS_ENABLED_SINGLE_FILE',
+        url: `https://gems.vernier.prof/${gem}/${path}`
       };
     }
     case 'normal': {
