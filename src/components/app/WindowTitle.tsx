@@ -30,7 +30,7 @@ type StateProps = {
 type Props = ConnectedProps<{}, StateProps, {}>;
 
 const SEPARATOR = ' – ';
-const PRODUCT = 'Firefox Profiler';
+const PRODUCT = 'Vernier Profiler';
 
 class WindowTitleImpl extends PureComponent<Props> {
   // This component updates window title in the form of:
