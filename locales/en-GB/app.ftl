@@ -328,7 +328,7 @@ Home--instructions-content =
     However, existing profiles can be viewed in any modern browser.
 Home--record-instructions-start-stop = Stop and start profiling
 Home--record-instructions-capture-load = Capture and load profile
-Home--profiler-motto = Capture a performance profile. Analyse it. Share it. Make the web faster.
+Home--profiler-motto = Capture a performance profile. Analyse it. Share it. Make Ruby faster.
 Home--additional-content-title = Load existing profiles
 Home--additional-content-content = You can <strong>drag and drop</strong> a profile file here to load it, or:
 Home--compare-recordings-info = You can also compare recordings. <a>Open the comparing interface.</a>

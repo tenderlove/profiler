@@ -518,13 +518,19 @@ class HomeImpl extends React.PureComponent<HomeProps, HomeState> {
           ) : null}
           <Localized id="Home--profiler-motto">
             <p>
-              Capture a performance profile. Analyze it. Share it. Make the web
-              faster.
+              Capture a performance profile. Analyze it. Share it. Make Ruby faster.
             </p>
           </Localized>
-          <TransitionGroup className="homeInstructionsTransitionGroup">
-            {this._renderInstructions()}
-          </TransitionGroup>
+          <div
+            className="homeInstructions"
+            data-testid="home-enable-popup-instructions"
+          >
+            <img
+              className="homeSectionScreenshot"
+              src={PerfScreenshot}
+              alt="screenshot of profiler.firefox.com"
+            />
+          </div>
           <section className="homeAdditionalContent">
             {/* Grid container: homeAdditionalContent */}
             <h2 className="homeAdditionalContentTitle protocol-display-xs">
@@ -554,7 +560,7 @@ class HomeImpl extends React.PureComponent<HomeProps, HomeState> {
               />
 
               <p>
-                This web interface is just a few modifications on top of the
+                This web interface is just a few modifications on top of the 
                 <a href="https://profiler.firefox.com/">Firefox profiler</a> to adapt better to Ruby profiling.
                 Vernier profiles are compatble with either tool.
               </p>
