@@ -530,6 +530,22 @@ class HomeImpl extends React.PureComponent<HomeProps, HomeState> {
               src={PerfScreenshot}
               alt="screenshot of profiler.firefox.com"
             />
+            <div>
+              Capture a profile from your ruby program by installing the `vernier` gem and then recording a profile using one of the following:<br/><br/>
+
+      To profile a single expensive method call
+              <pre>
+      Vernier.trace(out: "profile.vernier.json") do<br/>
+        &nbsp;&nbsp;some_slow_method()<br/>
+      end</pre>
+
+      To profile a full program run (great for measuring test runs)
+      <pre>
+        $ vernier run -- bundle exec ruby ...
+      </pre>
+
+      For more options check the <a href="https://github.com/jhawthorn/vernier#README">README on GitHub</a>
+            </div>
           </div>
           <section className="homeAdditionalContent">
             {/* Grid container: homeAdditionalContent */}
