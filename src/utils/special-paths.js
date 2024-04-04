@@ -96,6 +96,10 @@ const localhostPathRegex = new RegExp(
   "^(?<host>" + PROFILER_SERVER_ORIGIN + ")\/source(?<path>.*)$");
 const gemPathRegex =
   /^gem:(?<gem>[A-Za-z0-9\-_\.]+):(?<path>[^:]*)$/;
+const rubyextlibPathRegex =
+  /^rubylib:(?<version>[0-9\.]+):(?<ext>bigdecimal|cgi|continuation|coverage|date|digest|erb|etc|fcntl|fiddle|io|json|monitor|nkf|objspace|openssl|pathname|psych|pty|racc|rbconfig|readline|ripper|rubyvm|socket|stringio|strscan|syslog|win32|win32ole|zlib)\/(?<path>[^:]*)$/;
+const rubylibPathRegex =
+  /^rubylib:(?<version>[0-9\.]+):(?<path>[^:]*)$/;
 
 export function parseFileNameFromSymbolication(
   file: string
@@ -149,6 +153,30 @@ export function parseFileNameFromSymbolication(
       type: 'gem',
       gem,
       path,
+    };
+  }
+
+  const extMatch = rubyextlibPathRegex.exec(file);
+  if (extMatch !== null && extMatch.groups) {
+    const { version, ext, path } = extMatch.groups;
+    const repopath = `ext/${ext}/lib/${ext}/${path}`;
+    return {
+      type: 'git',
+      repo: "github.com/ruby/ruby",
+      rev: `v${version.replaceAll(".", "_")}`,
+      path: repopath,
+    };
+  }
+
+  const rubylibMatch = rubylibPathRegex.exec(file);
+  if (rubylibMatch !== null && rubylibMatch.groups) {
+    const { version, path } = rubylibMatch.groups;
+    const repopath = `lib/${path}`;
+    return {
+      type: 'git',
+      repo: "github.com/ruby/ruby",
+      rev: `v${version.replaceAll(".", "_")}`,
+      path: repopath,
     };
   }
 
