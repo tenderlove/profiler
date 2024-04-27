@@ -547,6 +547,7 @@ class HomeImpl extends React.PureComponent<HomeProps, HomeState> {
       Or browse a demo:
       <ul>
       <li><a href="/from-url/https%3A%2F%2Fraw.githubusercontent.com%2Fjhawthorn%2Fvernier-examples%2Fmain%2Fsimple_rails_request.json/calltree/?globalTrackOrder=0&thread=0&timelineType=category&v=10">Simple Rails request</a></li>
+      <li><a href="/from-url/https%3A%2F%2Fjhawthorn.github.io%2Fvernier-examples%2Fbundler.json/stack-chart/?globalTrackOrder=0&hiddenLocalTracksByPid=727970-0&thread=0&timelineType=category&v=10">bundler (bundle lock)</a></li>
       </ul>
 
       For more options check the <a href="https://github.com/jhawthorn/vernier#README">README on GitHub</a>
