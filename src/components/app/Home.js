@@ -535,7 +535,7 @@ class HomeImpl extends React.PureComponent<HomeProps, HomeState> {
 
       To profile a single expensive method call
               <pre>
-      Vernier.trace(out: "profile.vernier.json") do<br/>
+      Vernier.profile(out: "profile.vernier.json") do<br/>
         &nbsp;&nbsp;some_slow_method()<br/>
       end</pre>
 
@@ -582,7 +582,7 @@ class HomeImpl extends React.PureComponent<HomeProps, HomeState> {
               />
 
               <p>
-                This web interface is just a few modifications on top of the 
+                This web interface is just a few modifications on top of the
                 <a href="https://profiler.firefox.com/">Firefox profiler</a> to adapt better to Ruby profiling.
                 Vernier profiles are compatble with either tool.
               </p>
