@@ -10,11 +10,14 @@ HTTP_ROOT = File.expand_path File.join(__dir__, "..", "dist")
 # export const PROFILER_SERVER_ORIGIN = 'http://localhost:5252';
 PORT = 5252
 
+profile_paths = []
 server = WEBrick::HTTPServer.new :Port => PORT,
   :DocumentRoot => HTTP_ROOT,
   :StartCallback => lambda {
-    should_get = "http://localhost:#{PORT}/from-url/" + CGI.escape("http://localhost:#{PORT}/profile")
-    system("open #{should_get}")
+    profile_paths.each do |path|
+      should_get = "http://localhost:#{PORT}/from-url/" + CGI.escape("http://localhost:#{PORT}#{path}")
+      system("open #{should_get}")
+    end
   }
 
 class Source < WEBrick::HTTPServlet::AbstractServlet
@@ -63,9 +66,9 @@ trap 'INT' do server.shutdown end
 
 server.mount "/from-url", GetIndex
 
-profile = ARGV[0]
-if profile
-  valid_files = Set.new
+valid_files = Set.new
+
+ARGV.each.with_index do |profile, index|
   full_path = File.expand_path profile
   parsed_file = JSON.parse File.read full_path
   parsed_file["threads"].each do |thread|
@@ -79,7 +82,13 @@ if profile
     end
   end
 
-  server.mount "/profile", Profile, full_path, parsed_file
+  uri_path = "/profile#{index unless ARGV.size == 1}"
+  $stderr.puts "Mounting #{full_path} at #{uri_path}"
+  server.mount uri_path, Profile, full_path, parsed_file
+  profile_paths << uri_path
+end
+
+unless valid_files.empty?
   server.mount "/source", Source, valid_files
 end
 
