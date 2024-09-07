@@ -19,6 +19,7 @@ import {
   addActiveTabInformationToProfile,
   getProfileWithEventDelays,
   getProfileWithThreadCPUDelta,
+  getThreadWithMarkers,
 } from '../fixtures/profiles/processed-profile';
 import {
   getEmptyThread,
@@ -902,6 +903,52 @@ describe('actions/ProfileView', function () {
       expect(getMarker(markerIndexes[1]).name.includes('b')).toBeTruthy();
     });
 
+    it('filters the markers by searchable unique-string fields', function () {
+      const profile = getProfileWithMarkers([
+        [
+          'a',
+          5,
+          10,
+          {
+            type: 'StringTesting',
+            searchableString: 'searchable cucumber',
+            searchableUniqueString: 'searchable mango',
+            nonSearchableString: 'non-searchable papaya',
+            nonSearchableUniqueString: 'non-searchable onion',
+          },
+        ],
+      ]);
+      const { dispatch, getState } = storeWithProfile(profile);
+
+      expect(
+        selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState())
+      ).toHaveLength(1);
+
+      const getMarker = selectedThreadSelectors.getMarkerGetter(getState());
+      const markerPayload: MixedObject = (getMarker(0).data: any);
+      expect(typeof markerPayload.searchableString).toBe('string');
+      expect(typeof markerPayload.searchableUniqueString).toBe('number');
+      expect(typeof markerPayload.nonSearchableString).toBe('string');
+      expect(typeof markerPayload.nonSearchableUniqueString).toBe('number');
+
+      function getMarkerIndexesForSearch(searchString) {
+        dispatch(ProfileView.changeMarkersSearchString(searchString));
+        return selectedThreadSelectors.getSearchFilteredMarkerIndexes(
+          getState()
+        );
+      }
+
+      // cucumber and mango should match the marker, because those strings
+      // are contained in searchable fields.
+      expect(getMarkerIndexesForSearch('cucumber')).toHaveLength(1);
+      expect(getMarkerIndexesForSearch('mango')).toHaveLength(1);
+
+      // papaya and onion should not match the marker, because those strings
+      // are only contained in non-searchable fields.
+      expect(getMarkerIndexesForSearch('papaya')).toHaveLength(0);
+      expect(getMarkerIndexesForSearch('onion')).toHaveLength(0);
+    });
+
     it('filters the markers by a potential data payload of type FileIO', function () {
       const profile = getProfileWithMarkers([
         ['a', 0, null],
@@ -1265,6 +1312,70 @@ describe('actions/ProfileView', function () {
         selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState());
       expect(markerIndexes).toHaveLength(1);
       expect(getMarker(markerIndexes[0]).name.includes('a')).toBeTruthy();
+
+      // Testing the negative filtering
+
+      // Tests the basic negative filtering with "-timing".
+      dispatch(ProfileView.changeMarkersSearchString('-name:mark'));
+
+      markerIndexes =
+        selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState());
+      expect(markerIndexes).toHaveLength(3);
+      expect(getMarker(markerIndexes[0]).name.includes('a')).toBeTruthy();
+      expect(getMarker(markerIndexes[1]).name.includes('c')).toBeTruthy();
+      expect(getMarker(markerIndexes[2]).name.includes('d')).toBeTruthy();
+
+      // Tests multiple negative filtering with "-mark,-clic".
+      dispatch(ProfileView.changeMarkersSearchString('-name:mark,-name:clic'));
+
+      markerIndexes =
+        selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState());
+      expect(markerIndexes).toHaveLength(2);
+      expect(getMarker(markerIndexes[0]).name.includes('a')).toBeTruthy();
+      expect(getMarker(markerIndexes[1]).name.includes('c')).toBeTruthy();
+
+      // Tests the negative filtering on a field with "-timing".
+      dispatch(ProfileView.changeMarkersSearchString('-type:timing'));
+
+      markerIndexes =
+        selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState());
+      expect(markerIndexes).toHaveLength(2);
+      expect(getMarker(markerIndexes[0]).name.includes('a')).toBeTruthy();
+      expect(getMarker(markerIndexes[1]).name.includes('c')).toBeTruthy();
+
+      // Tests searching for the UserTiming type and negative search field.
+      dispatch(ProfileView.changeMarkersSearchString('type:timing,-name:b'));
+
+      markerIndexes =
+        selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState());
+      expect(markerIndexes).toHaveLength(1);
+      expect(getMarker(markerIndexes[0]).name.includes('d')).toBeTruthy();
+
+      // Tests searching for the mark-1 string making sure that it successfully gets it.
+      dispatch(ProfileView.changeMarkersSearchString('-1'));
+
+      markerIndexes =
+        selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState());
+      expect(markerIndexes).toHaveLength(1);
+      expect(getMarker(markerIndexes[0]).name.includes('b')).toBeTruthy();
+
+      // Tests searching for the mark-1 as a field string making sure that it successfully gets it.
+      dispatch(ProfileView.changeMarkersSearchString('name:-1'));
+
+      markerIndexes =
+        selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState());
+      expect(markerIndexes).toHaveLength(1);
+      expect(getMarker(markerIndexes[0]).name.includes('b')).toBeTruthy();
+
+      // Tests searching for the mark-1 as a negative filter to make sure we exclude it.
+      dispatch(ProfileView.changeMarkersSearchString('-name:-1'));
+
+      markerIndexes =
+        selectedThreadSelectors.getSearchFilteredMarkerIndexes(getState());
+      expect(markerIndexes).toHaveLength(3);
+      expect(getMarker(markerIndexes[0]).name.includes('a')).toBeTruthy();
+      expect(getMarker(markerIndexes[1]).name.includes('c')).toBeTruthy();
+      expect(getMarker(markerIndexes[2]).name.includes('d')).toBeTruthy();
     });
   });
 
@@ -1498,7 +1609,7 @@ describe('actions/ProfileView', function () {
       ]);
     });
 
-    it('pops a committed range and unsets the selection', function () {
+    it('pops a committed range and sets the selection', function () {
       const { getState, dispatch } = setupStore();
       dispatch(
         ProfileView.updatePreviewSelection({
@@ -1526,6 +1637,36 @@ describe('actions/ProfileView', function () {
         { start: 0, end: 10 },
         { start: 1, end: 9 },
       ]);
+      expect(ProfileViewSelectors.getPreviewSelection(getState())).toEqual({
+        hasSelection: true,
+        isModifying: false,
+        selectionStart: 3,
+        selectionEnd: 7,
+      });
+    });
+
+    it('unsets the selection when popping the current committed range', function () {
+      const { getState, dispatch } = setupStore();
+      expect(UrlStateSelectors.getAllCommittedRanges(getState())).toEqual([
+        { start: 0, end: 10 },
+        { start: 1, end: 9 },
+        { start: 2, end: 8 },
+        { start: 3, end: 7 },
+      ]);
+
+      dispatch(ProfileView.popCommittedRanges(2));
+      expect(UrlStateSelectors.getAllCommittedRanges(getState())).toEqual([
+        { start: 0, end: 10 },
+        { start: 1, end: 9 },
+      ]);
+      expect(ProfileViewSelectors.getPreviewSelection(getState())).toEqual({
+        hasSelection: true,
+        isModifying: false,
+        selectionStart: 3,
+        selectionEnd: 7,
+      });
+
+      dispatch(ProfileView.popCommittedRanges(2));
       expect(ProfileViewSelectors.getPreviewSelection(getState())).toEqual({
         hasSelection: false,
         isModifying: false,
@@ -3353,6 +3494,143 @@ describe('pages and active tab selectors', function () {
     expect(
       ProfileViewSelectors.getRelevantInnerWindowIDsForCurrentTab(getState())
     ).toEqual(new Set());
+  });
+
+  it('getTabToThreadIndexesMap will construct an empty map if the threads is empty', function () {
+    const { profile } = addActiveTabInformationToProfile(
+      getEmptyProfile(),
+      firstTabTabID
+    );
+    // Adding an empty thread to the profile so the loadProfile function won't complain
+    profile.threads.push(getEmptyThread());
+    const { getState } = storeWithProfile(profile);
+
+    // The profile doesn't have any samples or markers. It should  produce an empty map.
+    expect(ProfileViewSelectors.getTabToThreadIndexesMap(getState())).toEqual(
+      new Map()
+    );
+  });
+
+  it('getTabToThreadIndexesMap will construct a correct map if the thread has samples with innerWindowIDs', function () {
+    const { profile, ...pageInfo } = addActiveTabInformationToProfile(
+      getEmptyProfile(),
+      firstTabTabID
+    );
+    // Add 3 threads to add some samples.
+    profile.threads = [getEmptyThread(), getEmptyThread(), getEmptyThread()];
+
+    // Add some frames with innerWindowIDs now. Note that we only expand the
+    // innerWindowID array and not the others as we don't check them at all.
+    //
+    // Thread 0 and 1 will be present in firstTabTabID.
+    // Thread 1 and 2 will be present in secondTabTabID.
+    profile.threads[0].frameTable.innerWindowID[0] =
+      pageInfo.parentInnerWindowIDsWithChildren;
+    profile.threads[0].frameTable.length++;
+
+    profile.threads[1].frameTable.innerWindowID[0] =
+      pageInfo.firstTabInnerWindowIDs[2];
+    profile.threads[1].frameTable.length++;
+    profile.threads[1].frameTable.innerWindowID[1] =
+      pageInfo.secondTabInnerWindowIDs[0];
+    profile.threads[1].frameTable.length++;
+
+    profile.threads[2].frameTable.innerWindowID[0] =
+      pageInfo.secondTabInnerWindowIDs[1];
+    profile.threads[2].frameTable.length++;
+
+    const { getState } = storeWithProfile(profile);
+
+    // It should match the new map of:
+    // Thread 0 and 1 will be present in firstTabTabID.
+    // Thread 1 and 2 will be present in secondTabTabID.
+    const result = [
+      [pageInfo.firstTabTabID, new Set([0, 1])],
+      [pageInfo.secondTabTabID, new Set([1, 2])],
+    ];
+    expect(ProfileViewSelectors.getTabToThreadIndexesMap(getState())).toEqual(
+      new Map(result)
+    );
+  });
+
+  it('getTabToThreadIndexesMap will construct a correct map if the thread has markers with innerWindowIDs', function () {
+    const { profile, ...pageInfo } = addActiveTabInformationToProfile(
+      getEmptyProfile(),
+      firstTabTabID
+    );
+    // Add 3 threads to add some samples.
+    // profile.threads = [getEmptyThread(), getEmptyThread(), getEmptyThread()];
+
+    // Add some frames with innerWindowIDs now. Note that we only expand the
+    // innerWindowID array and not the others as we don't check them at all.
+    //
+    // Thread 0 and 1 will be present in firstTabTabID.
+    // Thread 1 and 2 will be present in secondTabTabID.
+    profile.threads.push(
+      getThreadWithMarkers([
+        [
+          'Test 1',
+          1,
+          null,
+          {
+            type: 'tracing',
+            category: 'Navigation',
+            innerWindowID: pageInfo.parentInnerWindowIDsWithChildren,
+          },
+        ],
+      ])
+    );
+    profile.threads.push(
+      getThreadWithMarkers([
+        [
+          'Test 2',
+          1,
+          null,
+          {
+            type: 'tracing',
+            category: 'Navigation',
+            innerWindowID: pageInfo.firstTabInnerWindowIDs[2],
+          },
+        ],
+        [
+          'Test 3',
+          2,
+          null,
+          {
+            type: 'tracing',
+            category: 'Navigation',
+            innerWindowID: pageInfo.secondTabInnerWindowIDs[0],
+          },
+        ],
+      ])
+    );
+    profile.threads.push(
+      getThreadWithMarkers([
+        [
+          'Test 4',
+          1,
+          null,
+          {
+            type: 'tracing',
+            category: 'Navigation',
+            innerWindowID: pageInfo.secondTabInnerWindowIDs[1],
+          },
+        ],
+      ])
+    );
+
+    const { getState } = storeWithProfile(profile);
+
+    // It should match the new map of:
+    // Thread 0 and 1 will be present in firstTabTabID.
+    // Thread 1 and 2 will be present in secondTabTabID.
+    const result = [
+      [pageInfo.firstTabTabID, new Set([0, 1])],
+      [pageInfo.secondTabTabID, new Set([1, 2])],
+    ];
+    expect(ProfileViewSelectors.getTabToThreadIndexesMap(getState())).toEqual(
+      new Map(result)
+    );
   });
 });
 

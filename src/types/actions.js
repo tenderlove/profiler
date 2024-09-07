@@ -93,6 +93,8 @@ export type PreviewSelection =
       +isModifying: boolean,
       +selectionStart: number,
       +selectionEnd: number,
+      +draggingStart?: boolean,
+      +draggingEnd?: boolean,
     |};
 
 /**
@@ -457,7 +459,11 @@ type UrlStateAction =
     |}
   | {| +type: 'CHANGE_SELECTED_TAB', +selectedTab: TabSlug |}
   | {| +type: 'COMMIT_RANGE', +start: number, +end: number |}
-  | {| +type: 'POP_COMMITTED_RANGES', +firstPoppedFilterIndex: number |}
+  | {|
+      +type: 'POP_COMMITTED_RANGES',
+      +firstPoppedFilterIndex: number,
+      +committedRange: StartEndRange | false,
+    |}
   | {|
       +type: 'CHANGE_SELECTED_THREAD',
       +selectedThreadIndexes: Set<ThreadIndex>,
@@ -551,6 +557,10 @@ type UrlStateAction =
       +type: 'TOGGLE_SIDEBAR_OPEN_CATEGORY',
       +kind: string,
       +category: IndexIntoCategoryList,
+    |}
+  | {|
+      +type: 'CHANGE_TAB_FILTER',
+      +tabID: TabID | null,
     |};
 
 type IconsAction =

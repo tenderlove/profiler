@@ -418,12 +418,46 @@ Object {
         ],
         "name": "RefreshDriverTick",
       },
+      Object {
+        "data": Array [
+          Object {
+            "format": "string",
+            "key": "searchableString",
+            "label": "Searchable string field",
+            "searchable": true,
+          },
+          Object {
+            "format": "unique-string",
+            "key": "searchableUniqueString",
+            "label": "Searchable unique string field",
+            "searchable": true,
+          },
+          Object {
+            "format": "string",
+            "key": "nonSearchableString",
+            "label": "Non-searchable string field",
+            "searchable": false,
+          },
+          Object {
+            "format": "unique-string",
+            "key": "nonSearchableUniqueString",
+            "label": "Non-searchable unique string field",
+            "searchable": false,
+          },
+        ],
+        "display": Array [
+          "marker-chart",
+          "marker-table",
+          "timeline-overview",
+        ],
+        "name": "StringTesting",
+      },
     ],
     "misc": "",
     "oscpu": "",
     "physicalCPUs": 0,
     "platform": "",
-    "preprocessedProfileVersion": 48,
+    "preprocessedProfileVersion": 50,
     "processType": 0,
     "product": "Firefox",
     "sourceURL": "",
@@ -431,7 +465,7 @@ Object {
     "startTime": 0,
     "symbolicated": true,
     "toolkit": "",
-    "version": 29,
+    "version": 30,
   },
   "pages": Array [
     Object {
