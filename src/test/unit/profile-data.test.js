@@ -1137,18 +1137,22 @@ describe('extractProfileFilterPageData', function () {
       innerWindowID: 1,
       url: 'https://www.mozilla.org',
       embedderInnerWindowID: 0,
+      favicon: 'data:image/png;base64,test-png-favicon-data-for-mozilla.org',
     },
     aboutBlank: {
       tabID: 2222,
       innerWindowID: 2,
       url: 'about:blank',
       embedderInnerWindowID: 0,
+      favicon: null,
     },
     profiler: {
       tabID: 2222,
       innerWindowID: 3,
       url: 'https://profiler.firefox.com/public/xyz',
       embedderInnerWindowID: 0,
+      favicon:
+        'data:image/png;base64,test-png-favicon-data-for-profiler.firefox.com',
     },
     exampleSubFrame: {
       tabID: 2222,
@@ -1156,26 +1160,29 @@ describe('extractProfileFilterPageData', function () {
       url: 'https://example.com/subframe',
       // This is a subframe of the page above.
       embedderInnerWindowID: 3,
+      favicon: 'data:image/png;base64,test-png-favicon-data-for-example.com',
     },
     exampleTopFrame: {
       tabID: 2222,
       innerWindowID: 5,
       url: 'https://example.com',
       embedderInnerWindowID: 0,
+      favicon: 'data:image/png;base64,test-png-favicon-data-for-example.com',
     },
   };
 
   it('extracts the page data when there is only one relevant page', function () {
     // Adding only the https://www.mozilla.org page.
     const pagesMap = new Map([[pages.mozilla.tabID, [pages.mozilla]]]);
-    const pageData = extractProfileFilterPageData(pagesMap);
+    const pageData = extractProfileFilterPageData(pagesMap, null);
     expect([...pageData]).toEqual([
       [
         pages.mozilla.tabID,
         {
           origin: 'https://www.mozilla.org',
           hostname: 'www.mozilla.org',
-          favicon: 'https://www.mozilla.org/favicon.ico',
+          favicon:
+            'data:image/png;base64,test-png-favicon-data-for-mozilla.org',
         },
       ],
     ]);
@@ -1186,14 +1193,15 @@ describe('extractProfileFilterPageData', function () {
       [pages.profiler.tabID, [pages.profiler, pages.exampleSubFrame]],
     ]);
 
-    const pageData = extractProfileFilterPageData(pagesMap);
+    const pageData = extractProfileFilterPageData(pagesMap, null);
     expect([...pageData]).toEqual([
       [
         pages.profiler.tabID,
         {
           origin: 'https://profiler.firefox.com',
           hostname: 'profiler.firefox.com',
-          favicon: 'https://profiler.firefox.com/favicon.ico',
+          favicon:
+            'data:image/png;base64,test-png-favicon-data-for-profiler.firefox.com',
         },
       ],
     ]);
@@ -1204,14 +1212,15 @@ describe('extractProfileFilterPageData', function () {
       [pages.profiler.tabID, [pages.aboutBlank, pages.profiler]],
     ]);
 
-    const pageData = extractProfileFilterPageData(pagesMap);
+    const pageData = extractProfileFilterPageData(pagesMap, null);
     expect([...pageData]).toEqual([
       [
         pages.profiler.tabID,
         {
           origin: 'https://profiler.firefox.com',
           hostname: 'profiler.firefox.com',
-          favicon: 'https://profiler.firefox.com/favicon.ico',
+          favicon:
+            'data:image/png;base64,test-png-favicon-data-for-profiler.firefox.com',
         },
       ],
     ]);
@@ -1220,14 +1229,14 @@ describe('extractProfileFilterPageData', function () {
   it('extracts the page data when there is only about:blank as relevant page', function () {
     const pagesMap = new Map([[pages.aboutBlank.tabID, [pages.aboutBlank]]]);
 
-    const pageData = extractProfileFilterPageData(pagesMap);
+    const pageData = extractProfileFilterPageData(pagesMap, null);
     expect([...pageData]).toEqual([
       [
         pages.aboutBlank.tabID,
         {
           origin: 'about:blank',
           hostname: 'about:blank',
-          favicon: null,
+          favicon: 'test-file-stub',
         },
       ],
     ]);
@@ -1240,7 +1249,7 @@ describe('extractProfileFilterPageData', function () {
       [pages.exampleSubFrame.tabID, [pages.exampleSubFrame]],
     ]);
 
-    const pageData = extractProfileFilterPageData(pagesMap);
+    const pageData = extractProfileFilterPageData(pagesMap, null);
     expect([...pageData]).toEqual([]);
     expect(console.error).toHaveBeenCalled();
   });
@@ -1250,14 +1259,15 @@ describe('extractProfileFilterPageData', function () {
       [pages.profiler.tabID, [pages.profiler, pages.exampleTopFrame]],
     ]);
 
-    const pageData = extractProfileFilterPageData(pagesMap);
+    const pageData = extractProfileFilterPageData(pagesMap, null);
     expect([...pageData]).toEqual([
       [
         pages.profiler.tabID,
         {
           origin: 'https://example.com',
           hostname: 'example.com',
-          favicon: 'https://example.com/favicon.ico',
+          favicon:
+            'data:image/png;base64,test-png-favicon-data-for-example.com',
         },
       ],
     ]);
@@ -1268,14 +1278,15 @@ describe('extractProfileFilterPageData', function () {
       [pages.mozilla.tabID, [pages.mozilla]],
       [pages.profiler.tabID, [pages.profiler, pages.exampleSubFrame]],
     ]);
-    const pageData = extractProfileFilterPageData(pagesMap);
+    const pageData = extractProfileFilterPageData(pagesMap, null);
     expect([...pageData]).toEqual([
       [
         pages.mozilla.tabID,
         {
           origin: 'https://www.mozilla.org',
           hostname: 'www.mozilla.org',
-          favicon: 'https://www.mozilla.org/favicon.ico',
+          favicon:
+            'data:image/png;base64,test-png-favicon-data-for-mozilla.org',
         },
       ],
       [
@@ -1283,7 +1294,8 @@ describe('extractProfileFilterPageData', function () {
         {
           origin: 'https://profiler.firefox.com',
           hostname: 'profiler.firefox.com',
-          favicon: 'https://profiler.firefox.com/favicon.ico',
+          favicon:
+            'data:image/png;base64,test-png-favicon-data-for-profiler.firefox.com',
         },
       ],
     ]);

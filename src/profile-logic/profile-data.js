@@ -31,6 +31,8 @@ import {
   ensureExists,
   getFirstItemFromSet,
 } from 'firefox-profiler/utils/flow';
+import ExtensionFavicon from '../../res/img/svg/extension-outline.svg';
+import DefaultLinkFavicon from '../../res/img/svg/globe.svg';
 
 import type {
   Profile,
@@ -2933,7 +2935,8 @@ export function filterToRetainedAllocations(
  * Returns null if we don't have information about pages (in older profiles).
  */
 export function extractProfileFilterPageData(
-  pagesMapByTabID: Map<TabID, PageList> | null
+  pagesMapByTabID: Map<TabID, PageList> | null,
+  extensionIDToNameMap: Map<string, string> | null
 ): Map<TabID, ProfileFilterPageData> {
   if (pagesMapByTabID === null) {
     // We don't have pages array (which is the case for older profiles). Return early.
@@ -2965,39 +2968,62 @@ export function extractProfileFilterPageData(
     }
 
     // The last page is the one we care about.
-    const pageUrl = topMostPages[topMostPages.length - 1].url;
+    const currentPage = topMostPages[topMostPages.length - 1];
+    const pageUrl = currentPage.url;
     if (pageUrl.startsWith('about:')) {
       // If we only have an `about:*` page, we should return early with a friendly
       // origin and hostname. Otherwise the try block will always fail.
       pageDataByTabID.set(tabID, {
         origin: pageUrl,
         hostname: pageUrl,
-        favicon: null,
+        favicon: DefaultLinkFavicon,
       });
       continue;
     }
 
+    // Constructing the page data outside of the try-catch block, and adding it
+    // to the map outside of it as well. This is mostly because some favicon URL
+    // constructions might fail and we don't want to miss them still. We should
+    // always have at least a hostname, which is needed for displaying the tab
+    // name.
+    // The known failing case is when we try to construct a URL with a
+    // moz-extension:// protocol on platforms outside of Firefox. Only Firefox
+    // can parse it properly. Chrome and node will output a URL with no `origin`.
+    const isExtension = pageUrl.startsWith('moz-extension://');
+    const defaultFavicon = isExtension ? ExtensionFavicon : DefaultLinkFavicon;
+    const pageData: ProfileFilterPageData = {
+      origin: '',
+      hostname: '',
+      favicon: currentPage.favicon ?? defaultFavicon,
+    };
+
     try {
       const page = new URL(pageUrl);
-      // FIXME(Bug 1620546): This is not ideal and we should get the favicon
-      // either during profile capture or profile pre-process.
-      const favicon = new URL('/favicon.ico', page.origin);
-      if (favicon.protocol === 'http:') {
-        // Upgrade http requests.
-        favicon.protocol = 'https:';
-      }
-      pageDataByTabID.set(tabID, {
-        origin: page.origin,
-        hostname: page.hostname,
-        favicon: favicon.href,
-      });
+
+      pageData.hostname =
+        extensionIDToNameMap && isExtension
+          ? // Get the real extension name if it's an extension.
+            (extensionIDToNameMap.get(
+              'moz-extension://' +
+                // For non-Firefox browsers, we can't construct a URL object
+                // with the 'moz-extension://' protocol properly. So we have to
+                // have a fallback that uses simple string split.
+                (page.hostname ? page.hostname : pageUrl.split('/')[2]) +
+                '/'
+            ) ?? '')
+          : page.hostname;
+
+      pageData.origin = page.origin;
     } catch (e) {
-      console.error(
+      console.warn(
         'Error while extracing the hostname and favicon from the page url',
         pageUrl
       );
-      continue;
     }
+
+    // Adding it to the map outside of the try-catch block, just in case something
+    // might fail.
+    pageDataByTabID.set(tabID, pageData);
   }
 
   return pageDataByTabID;
@@ -3712,7 +3738,8 @@ export function computeTabToThreadIndexesMap(
     // First go over the innerWindowIDs of the samples.
     for (let i = 0; i < thread.frameTable.length; i++) {
       const innerWindowID = thread.frameTable.innerWindowID[i];
-      if (innerWindowID === null) {
+      if (innerWindowID === null || innerWindowID === 0) {
+        // Zero value also means null for innerWindowID.
         continue;
       }
 
@@ -3720,9 +3747,6 @@ export function computeTabToThreadIndexesMap(
       if (tabID === undefined) {
         // We couldn't find the tab of this innerWindowID, this should
         // never happen, it might indicate a bug in Firefox.
-        console.warn(
-          `Failed to find the tabID of innerWindowID ${innerWindowID}`
-        );
         continue;
       }
 
@@ -3744,16 +3768,15 @@ export function computeTabToThreadIndexesMap(
 
       if (
         markerData.innerWindowID !== null &&
-        markerData.innerWindowID !== undefined
+        markerData.innerWindowID !== undefined &&
+        // Zero value also means null for innerWindowID.
+        markerData.innerWindowID !== 0
       ) {
         const innerWindowID = markerData.innerWindowID;
         const tabID = innerWindowIDToTabMap.get(innerWindowID);
         if (tabID === undefined) {
           // We couldn't find the tab of this innerWindowID, this should
           // never happen, it might indicate a bug in Firefox.
-          console.warn(
-            `Failed to find the tabID of innerWindowID ${innerWindowID}`
-          );
           continue;
         }
 

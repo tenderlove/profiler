@@ -663,6 +663,13 @@ TabBar--marker-table-tab = 标记表
 TabBar--network-tab = 网络
 TabBar--js-tracer-tab = JS 追踪器
 
+## TabSelectorMenu
+## This component is a context menu that's opened when you click on the root
+## range at the top left corner for profiler analysis view. It's used to switch
+## between tabs that were captured in the profile.
+
+TabSelectorMenu--all-tabs-and-windows = 所有标签页和窗口
+
 ## TrackContextMenu
 ## This is used as a context menu for timeline to organize the tracks in the
 ## analysis UI.
@@ -679,6 +686,10 @@ TrackContextMenu--hide-other-screenshots-tracks = 隐藏其他快照轨
 TrackContextMenu--hide-track = 隐藏“{ $trackName }”
 TrackContextMenu--show-all-tracks = 显示所有轨道
 TrackContextMenu--show-local-tracks-in-process = 显示此进程中的所有轨道
+# This is used as the context menu item to hide all tracks of the selected track's type.
+# Variables:
+#   $type (String) - Name of the type of selected track to hide.
+TrackContextMenu--hide-all-tracks-by-selected-track-type = 隐藏所有“{ $type }”类型的轨道
 # This is used in the tracks context menu as a button to show all the tracks
 # that match the search filter.
 TrackContextMenu--show-all-matching-tracks = 显示所有匹配的轨道

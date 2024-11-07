@@ -751,6 +751,13 @@ TabBar--marker-table-tab = Маркерна таблиця
 TabBar--network-tab = Мережа
 TabBar--js-tracer-tab = JS Tracer
 
+## TabSelectorMenu
+## This component is a context menu that's opened when you click on the root
+## range at the top left corner for profiler analysis view. It's used to switch
+## between tabs that were captured in the profile.
+
+TabSelectorMenu--all-tabs-and-windows = Усі вкладки та вікна
+
 ## TrackContextMenu
 ## This is used as a context menu for timeline to organize the tracks in the
 ## analysis UI.
@@ -767,6 +774,10 @@ TrackContextMenu--hide-other-screenshots-tracks = Сховати доріжки 
 TrackContextMenu--hide-track = Сховати “{ $trackName }”
 TrackContextMenu--show-all-tracks = Показати всі доріжки
 TrackContextMenu--show-local-tracks-in-process = Показати всі доріжки в цьому процесі
+# This is used as the context menu item to hide all tracks of the selected track's type.
+# Variables:
+#   $type (String) - Name of the type of selected track to hide.
+TrackContextMenu--hide-all-tracks-by-selected-track-type = Приховати всі доріжки типу “{ $type }”
 # This is used in the tracks context menu as a button to show all the tracks
 # that match the search filter.
 TrackContextMenu--show-all-matching-tracks = Показати всі відповідні доріжки
