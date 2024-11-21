@@ -4,12 +4,9 @@ require "webrick"
 require "json"
 require "cgi"
 require "optparse"
+require "socket"
 
 HTTP_ROOT = File.expand_path File.join(__dir__, "..", "dist")
-
-# This came from src/app-logic/constants.js
-# export const PROFILER_SERVER_ORIGIN = 'http://localhost:5252';
-PORT = 5252
 
 class Source < WEBrick::HTTPServlet::AbstractServlet
   def initialize server, valid_files
@@ -81,12 +78,14 @@ unless File.exist?(ARGV[0])
   exit(2)
 end
 
+port = 0
 profile_paths = []
-server = WEBrick::HTTPServer.new :Port => PORT,
+server = WEBrick::HTTPServer.new :Port => port,
   :DocumentRoot => HTTP_ROOT,
   :StartCallback => lambda {
+    port = server.config[:Port]
     profile_paths.each do |path|
-      should_get = "http://localhost:#{PORT}/from-url/" + CGI.escape("http://localhost:#{PORT}#{path}")
+      should_get = "http://localhost:#{port}/from-url/" + CGI.escape("http://localhost:#{port}#{path}")
       system("open #{should_get}")
     end
   }
@@ -104,7 +103,7 @@ ARGV.each.with_index do |profile, index|
     thread["stringArray"].map! do |str|
       if str.start_with?("/") && File.exist?(str)
         valid_files << str
-        "http://localhost:#{PORT}/source#{str}"
+        "http://localhost:#{port}/source#{str}"
       else
         str
       end
