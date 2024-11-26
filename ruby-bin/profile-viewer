@@ -98,7 +98,16 @@ valid_files = Set.new
 
 ARGV.each.with_index do |profile, index|
   full_path = File.expand_path profile
-  parsed_file = JSON.parse File.read full_path
+
+  is_gzipped = File.binread(full_path, 2) == "\x1F\x8B".b
+  content = if is_gzipped
+    require "zlib"
+    Zlib::GzipReader.open(full_path) { |gz| gz.read }
+  else
+    File.read full_path
+  end
+  parsed_file = JSON.parse content
+
   parsed_file["threads"].each do |thread|
     thread["stringArray"].map! do |str|
       if str.start_with?("/") && File.exist?(str)
