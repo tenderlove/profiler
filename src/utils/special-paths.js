@@ -5,6 +5,7 @@
 // @flow
 
 import { assertExhaustiveCheck } from 'firefox-profiler/utils/flow';
+import { rubyGemDownloadRecipe, normalPathCatchall } from 'firefox-profiler/utils/ruby-paths';
 import { PROFILER_SERVER_ORIGIN } from 'firefox-profiler/app-logic/constants';
 
 export type ParsedFileNameFromSymbolication =
@@ -275,14 +276,10 @@ export function getDownloadRecipeForSourceFile(
       };
     }
     case 'gem': {
-      const { gem, path } = parsedFile;
-      return {
-        type: 'CORS_ENABLED_SINGLE_FILE',
-        url: `https://gems.vernier.prof/${gem}/${path}`
-      };
+      return rubyGemDownloadRecipe(parsedFile);
     }
     case 'normal': {
-      return { type: 'NO_KNOWN_CORS_URL' };
+      return normalPathCatchall(parsedFile);
     }
     default:
       throw assertExhaustiveCheck(parsedFile.type, 'unhandled ParsedFile type');
