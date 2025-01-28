@@ -142,7 +142,9 @@ export class RegularExternalCommunicationDelegate implements ExternalCommunicati
             mode: 'cors',
             credentials: 'omit',
           }
-        : { credentials: 'omit' };
+        : url.startsWith('/')
+          ? {}
+          : { credentials: 'omit' };
     const response = await fetch(url, requestInit);
     if (response.status !== 200) {
       throw new Error(
