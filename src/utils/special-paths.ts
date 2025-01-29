@@ -3,6 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { assertExhaustiveCheck } from 'firefox-profiler/utils/types';
+import { tryLoadRubyHooks } from 'firefox-profiler/utils/ruby-hooks';
+// @flow
 
 export type ParsedFileNameFromSymbolication =
   | {
@@ -272,6 +274,9 @@ export function getDownloadRecipeForSourceFile(
       };
     }
     case 'gem': {
+      if (typeof rubyGemDownloadRecipe === 'function') {
+        return rubyGemDownloadRecipe(parsedFile);
+      }
       const { gem, path } = parsedFile;
       return {
         type: 'CORS_ENABLED_SINGLE_FILE',
@@ -279,9 +284,23 @@ export function getDownloadRecipeForSourceFile(
       };
     }
     case 'normal': {
+      if (typeof normalPathCatchall === 'function') {
+        return normalPathCatchall(parsedFile);
+      }
       return { type: 'NO_KNOWN_CORS_URL' };
     }
     default:
       throw assertExhaustiveCheck(parsedFile, 'unhandled ParsedFile type');
   }
 }
+
+let rubyGemDownloadRecipe;
+let normalPathCatchall;
+
+(async () => {
+    const symbols = await tryLoadRubyHooks();
+    if (symbols) {
+        rubyGemDownloadRecipe = symbols.rubyGemDownloadRecipe;
+        normalPathCatchall = symbols.normalPathCatchall;
+    }
+})();
