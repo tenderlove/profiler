@@ -11,11 +11,11 @@
 
 ## The following feature names must be treated as a brand. They cannot be translated.
 
--firefox-brand-name = Firefox
--firefox-android-brand-name = Firefox for Android
+-firefox-brand-name = Ruby
+-firefox-android-brand-name = Ruby
 -profiler-brand-name = Vernier Profiler
--profiler-brand-short-name = Profiler
--firefox-nightly-brand-name = Firefox Nightly
+-profiler-brand-short-name = Vernier
+-firefox-nightly-brand-name = Ruby
 
 ## AppHeader
 ## This is used at the top of the homepage and other content pages.
