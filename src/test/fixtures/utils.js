@@ -4,7 +4,7 @@
 // @flow
 import {
   getCallTree,
-  computeCallNodeLeafAndSummary,
+  computeCallNodeSelfAndSummary,
   computeCallTreeTimings,
   type CallTree,
 } from 'firefox-profiler/profile-logic/call-tree';
@@ -13,7 +13,12 @@ import {
   getCallNodeInfo,
   getSampleIndexToCallNodeIndex,
   getOriginAnnotationForFunc,
+  createThreadFromDerivedTables,
+  computeStackTableFromRawStackTable,
+  computeSamplesTableFromRawSamplesTable,
 } from 'firefox-profiler/profile-logic/profile-data';
+import { getProfileWithDicts } from './profiles/processed-profile';
+import { StringTable } from '../../utils/string-table';
 
 import type {
   IndexIntoCallNodeTable,
@@ -22,6 +27,9 @@ import type {
   State,
   Thread,
   IndexIntoStackTable,
+  RawThread,
+  IndexIntoCategoryList,
+  SampleUnits,
 } from 'firefox-profiler/types';
 
 import { ensureExists } from 'firefox-profiler/utils/flow';
@@ -111,6 +119,31 @@ export function getMouseEvent(
   return new FakeMouseEvent(type, values);
 }
 
+export function computeThreadFromRawThread(
+  rawThread: RawThread,
+  sampleUnits: SampleUnits | void,
+  referenceCPUDeltaPerMs: number,
+  defaultCategory: IndexIntoCategoryList
+): Thread {
+  const stringTable = StringTable.withBackingArray(rawThread.stringArray);
+  const stackTable = computeStackTableFromRawStackTable(
+    rawThread.stackTable,
+    rawThread.frameTable,
+    defaultCategory
+  );
+  const samples = computeSamplesTableFromRawSamplesTable(
+    rawThread.samples,
+    sampleUnits,
+    referenceCPUDeltaPerMs
+  );
+  return createThreadFromDerivedTables(
+    rawThread,
+    samples,
+    stackTable,
+    stringTable
+  );
+}
+
 /**
  * This function retrieves a CallTree object from a profile.
  * It's convenient to use it with formatTree below.
@@ -119,33 +152,31 @@ export function callTreeFromProfile(
   profile: Profile,
   threadIndex: number = 0
 ): CallTree {
-  const thread = profile.threads[threadIndex] ?? getEmptyThread();
-  const categories = ensureExists(
-    profile.meta.categories,
-    'Expected to find categories'
-  );
-  const defaultCategory = categories.findIndex((c) => c.name === 'Other');
+  if (!profile.threads[threadIndex]) {
+    profile.threads[threadIndex] = getEmptyThread();
+  }
+  const { derivedThreads, defaultCategory } = getProfileWithDicts(profile);
+  const thread = derivedThreads[threadIndex];
   const callNodeInfo = getCallNodeInfo(
     thread.stackTable,
     thread.frameTable,
-    thread.funcTable,
     defaultCategory
   );
   const callTreeTimings = computeCallTreeTimings(
     callNodeInfo,
-    computeCallNodeLeafAndSummary(
+    computeCallNodeSelfAndSummary(
       thread.samples,
       getSampleIndexToCallNodeIndex(
         thread.samples.stack,
-        callNodeInfo.getStackIndexToCallNodeIndex()
+        callNodeInfo.getStackIndexToNonInvertedCallNodeIndex()
       ),
-      callNodeInfo.getCallNodeTable().length
+      callNodeInfo.getNonInvertedCallNodeTable().length
     )
   );
   return getCallTree(
     thread,
     callNodeInfo,
-    categories,
+    ensureExists(profile.meta.categories),
     callTreeTimings,
     'samples'
   );

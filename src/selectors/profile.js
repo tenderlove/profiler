@@ -21,19 +21,25 @@ import {
   IPCMarkerCorrelations,
   correlateIPCMarkers,
 } from '../profile-logic/marker-data';
-import { markerSchemaFrontEndOnly } from '../profile-logic/marker-schema';
+import {
+  markerSchemaFrontEndOnly,
+  computeStringIndexMarkerFieldsByDataType,
+} from '../profile-logic/marker-schema';
 import { getDefaultCategories } from 'firefox-profiler/profile-logic/data-structures';
+import * as CommittedRanges from '../profile-logic/committed-ranges';
 import { defaultTableViewOptions } from '../reducers/profile-view';
+import { StringTable } from '../utils/string-table';
 import type { TabSlug } from '../app-logic/tabs-handling';
 
 import type {
   Profile,
   CategoryList,
   IndexIntoCategoryList,
-  Thread,
+  RawThread,
   ThreadIndex,
   Pid,
   Tid,
+  RawCounter,
   Counter,
   CounterIndex,
   PageList,
@@ -82,6 +88,7 @@ import type {
   TableViewOptions,
   ExtensionTable,
   SortedTabPageData,
+  TimelineUnit,
 } from 'firefox-profiler/types';
 
 import type { ThreadActivityScore } from '../profile-logic/tracks';
@@ -115,6 +122,10 @@ export const getFocusCallTreeGeneration: Selector<number> = (state) =>
   getProfileViewOptions(state).focusCallTreeGeneration;
 export const getZeroAt: Selector<Milliseconds> = (state) =>
   getProfileRootRange(state).start;
+export const getProfileTimelineUnit: Selector<TimelineUnit> = (state) => {
+  const { sampleUnits } = getProfile(state).meta;
+  return sampleUnits ? sampleUnits.time : 'ms';
+};
 
 export const getCommittedRange: Selector<StartEndRange> = createSelector(
   getProfileRootRange,
@@ -129,6 +140,16 @@ export const getCommittedRange: Selector<StartEndRange> = createSelector(
     }
     return rootRange;
   }
+);
+
+/**
+ * This selector transforms the committed ranges into a list of labels that can
+ * be displayed in the UI.
+ */
+export const getCommittedRangeLabels: Selector<string[]> = createSelector(
+  UrlState.getAllCommittedRanges,
+  getProfileTimelineUnit,
+  CommittedRanges.getCommittedRangeLabels
 );
 
 export const getMouseTimePosition: Selector<Milliseconds | null> = (state) =>
@@ -177,7 +198,7 @@ export const getPageList = (state: State): PageList | null =>
   getProfile(state).pages || null;
 export const getDefaultCategory: Selector<IndexIntoCategoryList> = (state) =>
   getCategories(state).findIndex((c) => c.color === 'grey');
-export const getThreads: Selector<Thread[]> = (state) =>
+export const getThreads: Selector<RawThread[]> = (state) =>
   getProfile(state).threads;
 export const getThreadNames: Selector<string[]> = (state) =>
   getProfile(state).threads.map((t) => t.name);
@@ -186,7 +207,7 @@ export const getLastNonShiftClick: Selector<
 > = (state) => getProfileViewOptions(state).lastNonShiftClick;
 export const getRightClickedTrack: Selector<TrackReference | null> = (state) =>
   getProfileViewOptions(state).rightClickedTrack;
-export const getCounter: Selector<Counter[] | null> = (state) =>
+export const getCounters: Selector<RawCounter[] | null> = (state) =>
   getProfile(state).counters || null;
 export const getMeta: Selector<ProfileMeta> = (state) => getProfile(state).meta;
 export const getVisualMetricsOrNull: Selector<VisualMetrics | null> = (state) =>
@@ -248,6 +269,12 @@ export const getMarkerSchema: Selector<MarkerSchema[]> = createSelector(
       ...markerSchemaFrontEndOnly,
     ];
   }
+);
+
+export const getStringIndexMarkerFieldsByDataType: Selector<
+  Map<string, string[]>,
+> = createSelector(getMarkerSchema, (schemaList) =>
+  computeStringIndexMarkerFieldsByDataType(schemaList)
 );
 
 export const getMarkerSchemaByName: Selector<MarkerSchemaByName> =
@@ -435,10 +462,11 @@ export const getGlobalTrackReferences: Selector<GlobalTrackReference[]> =
 export const getHasPreferenceMarkers: Selector<boolean> = createSelector(
   getThreads,
   (threads) => {
-    return threads.some(({ stringTable, markers }) => {
+    return threads.some(({ stringArray, markers }) => {
       /*
        * Does this particular thread have a Preference in it?
        */
+      const stringTable = StringTable.withBackingArray(stringArray);
       const indexForPreferenceString =
         stringTable.indexForString('PreferenceRead');
       return markers.name.some((name) => name === indexForPreferenceString);
@@ -569,7 +597,7 @@ export const getLocalTrackNamesByPid: Selector<Map<Pid, string[]>> =
   createSelector(
     getLocalTracksByPid,
     getThreads,
-    getCounter,
+    getCounters,
     (localTracksByPid, threads, counters) => {
       const localTrackNamesByPid = new Map();
       for (const [pid, localTracks] of localTracksByPid) {
@@ -718,21 +746,23 @@ export const getHiddenTrackCount: Selector<HiddenTrackCount> = createSelector(
   }
 );
 
-export const getMaxCPUDeltaPerInterval: Selector<number | null> =
-  createSelector(getProfile, CPU.computeMaxCPUDeltaPerInterval);
+export const getReferenceCPUDeltaPerMs: Selector<number> = createSelector(
+  getProfile,
+  CPU.computeReferenceCPUDeltaPerMs
+);
 
 export const getThreadActivityScores: Selector<Array<ThreadActivityScore>> =
   createSelector(
     getProfile,
-    getMaxCPUDeltaPerInterval,
-    (profile, maxCpuDeltaPerInterval) => {
+    getReferenceCPUDeltaPerMs,
+    (profile, referenceCPUDeltaPerMs) => {
       const { threads } = profile;
 
       return threads.map((thread) =>
         Tracks.computeThreadActivityScore(
           profile,
           thread,
-          maxCpuDeltaPerInterval
+          referenceCPUDeltaPerMs
         )
       );
     }
@@ -1053,15 +1083,6 @@ export const getProfiledThreadIds: Selector<Set<Tid>> = createSelector(
     return profiledThreadIds;
   }
 );
-
-/** Does the profile have implementation data? */
-export const getProfileUsesFrameImplementation: Selector<boolean> = (state) => {
-  const { profile } = state.profileView;
-  if (!profile) {
-    return true;
-  }
-  return profile.meta.doesNotUseFrameImplementation !== true;
-};
 
 /** Should the "Look up the function name on Searchfox" menu entry be hidden? */
 export const getShouldDisplaySearchfox: Selector<boolean> = (state) => {

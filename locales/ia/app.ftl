@@ -117,6 +117,7 @@ CallNodeContextMenu--searchfox = Recercar le nomine de function sur Searchfox
 CallNodeContextMenu--copy-function-name = Copiar nomine de function
 CallNodeContextMenu--copy-script-url = Copia URL de script
 CallNodeContextMenu--copy-stack = Copiar pila
+CallNodeContextMenu--show-the-function-in-devtools = Monstrar le function in DevTools
 
 ## CallTree
 ## This is the component for Call Tree panel.
@@ -334,6 +335,9 @@ Home--load-files-from-other-tools2 =
     ulle file que usa le <dhat>formato dhat</dhat> o <traceevent>le formato Trace Event
     de Google</traceevent>. <write>Apprende a scriber tu 
     proprie importator</write>.
+Home--install-chrome-extension = Installar le extension de Chrome
+Home--chrome-extension-instructions = Usa le <a>extension  de { -profiler-brand-name } pro Chrome</a> pro capturar profilos  de prestation in Chrome e analysar los in le { -profiler-brand-name }.
+Home--chrome-extension-recording-instructions = Installar le extension ab le Boteca web de Chrome. Un vice installate, usar le icone  barra del instrumentos del extensiones o le vias breve pro cessar de profilar. Tu alsi pote exportar profilos e cargar los ci pro analyse detaliate.
 
 ## IdleSearchField
 ## The component that is used for all the search inputs in the application.
@@ -619,6 +623,14 @@ NumberFormat--short-date = { SHORTDATE($date) }
 ## The component that is used for all the search input hints in the application.
 
 PanelSearch--search-field-hint = Sape tu que tu pote usar le comma (,) pro cercar per plure terminos?
+
+## Profile Name Button
+
+ProfileName--edit-profile-name-button =
+    .title = Rediger le nomine del profilo
+ProfileName--edit-profile-name-input =
+    .title = Rediger le nomine del profilo
+    .aria-label = Nomine del profilo
 
 ## Profile Delete Button
 

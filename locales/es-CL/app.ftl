@@ -96,6 +96,7 @@ CallNodeContextMenu--searchfox = Busca el nombre de la función en Searchfox
 CallNodeContextMenu--copy-function-name = Copiar nombre de la función
 CallNodeContextMenu--copy-script-url = Copiar URL del script
 CallNodeContextMenu--copy-stack = Copiar pila
+CallNodeContextMenu--show-the-function-in-devtools = Mostrar la función en DevTools
 
 ## CallTree
 ## This is the component for Call Tree panel.
@@ -277,12 +278,18 @@ Home--load-files-from-other-tools2 =
     panel de rendimiento de Chrome, <androidstudio>Android Studio</androidstudio>, o
     cualquier archivo usando el <dhat>formato dhat</dhat> o el <traceevent>formato Trace Event de Google</traceevent>. <write>Aprende a escribir tu
     propio importador</write>.
+Home--install-chrome-extension = Instalar la extensión de Chrome
+Home--chrome-extension-instructions =
+    Utiliza la <a>extensión de { -profiler-brand-name } para Chrome</a>
+    para capturar perfiles de rendimiento en Chrome y analizarlos en
+    { -profiler-brand-name }. Instala la extensión desde la Chrome Web Store.
+Home--chrome-extension-recording-instructions = Una vez instalada, utiliza el icono de la barra de herramientas de la extensión o los accesos directos para iniciar y detener la creación de perfiles. También puedes exportar perfiles y cargarlos aquí para realizar un análisis detallado.
 
 ## IdleSearchField
 ## The component that is used for all the search inputs in the application.
 
 IdleSearchField--search-input =
-    .placeholder = Ingrese términos de filtro
+    .placeholder = Ingresa los términos de filtro
 
 ## JsTracerSettings
 ## JSTracer is an experimental feature and it's currently disabled. See Bug 1565788.
@@ -562,6 +569,14 @@ NumberFormat--short-date = { SHORTDATE($date) }
 ## The component that is used for all the search input hints in the application.
 
 PanelSearch--search-field-hint = ¿Sabías que puedes usar la coma (,) para buscar usando varios términos?
+
+## Profile Name Button
+
+ProfileName--edit-profile-name-button =
+    .title = Editar el nombre del perfil
+ProfileName--edit-profile-name-input =
+    .title = Editar el nombre del perfil
+    .aria-label = Nombre del perfil
 
 ## Profile Delete Button
 
@@ -877,7 +892,7 @@ TrackBandwidthGraph--total-bandwidth-in-range = { $value } ({ $carbonValue } g C
 ## The component that is used for the search input in the track context menu.
 
 TrackSearchField--search-input =
-    .placeholder = Ingrese términos de filtro
+    .placeholder = Ingresa los términos de filtro
     .title = Mostrar solo las pistas que coinciden con cierto texto
 
 ## TransformNavigator

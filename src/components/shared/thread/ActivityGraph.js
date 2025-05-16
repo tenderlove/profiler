@@ -53,9 +53,10 @@ export type Props = {|
     IndexIntoSamplesTable
   ) => number,
   +enableCPUUsage: boolean,
-  +maxThreadCPUDeltaPerMs: number,
   +implementationFilter: ImplementationFilter,
   +timelineType: TimelineType,
+  +zeroAt: Milliseconds,
+  +profileTimelineUnit: string,
   ...SizeProps,
 |};
 
@@ -164,12 +165,13 @@ class ThreadActivityGraphImpl extends React.PureComponent<Props, State> {
       sampleIndexOffset,
       samplesSelectedStates,
       treeOrderSampleComparator,
-      maxThreadCPUDeltaPerMs,
       enableCPUUsage,
       implementationFilter,
       width,
       height,
       timelineType,
+      zeroAt,
+      profileTimelineUnit,
     } = this.props;
     const { hoveredPixelState, mouseX, mouseY } = this.state;
     return (
@@ -197,7 +199,6 @@ class ThreadActivityGraphImpl extends React.PureComponent<Props, State> {
           passFillsQuerier={this._setFillsQuerier}
           onClick={this._onClick}
           enableCPUUsage={enableCPUUsage}
-          maxThreadCPUDeltaPerMs={maxThreadCPUDeltaPerMs}
           width={width}
           height={height}
         />
@@ -213,6 +214,9 @@ class ThreadActivityGraphImpl extends React.PureComponent<Props, State> {
               rangeFilteredThread={rangeFilteredThread}
               categories={categories}
               implementationFilter={implementationFilter}
+              zeroAt={zeroAt}
+              profileTimelineUnit={profileTimelineUnit}
+              interval={interval}
             />
           </Tooltip>
         )}

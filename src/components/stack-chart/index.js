@@ -43,7 +43,6 @@ import { getBottomBoxInfoForCallNode } from '../../profile-logic/profile-data';
 import type {
   Thread,
   CategoryList,
-  CallNodeInfo,
   IndexIntoCallNodeTable,
   CombinedTimingRows,
   MarkerIndex,
@@ -58,6 +57,7 @@ import type {
   InnerWindowID,
   Page,
 } from 'firefox-profiler/types';
+import type { CallNodeInfo } from 'firefox-profiler/profile-logic/call-node-info';
 
 import type { ConnectedProps } from '../../utils/connect';
 
@@ -69,7 +69,6 @@ type StateProps = {|
   +thread: Thread,
   +weightType: WeightType,
   +innerWindowIDToPageMap: Map<InnerWindowID, Page> | null,
-  +maxStackDepthPlusOne: number,
   +combinedTimingRows: CombinedTimingRows,
   +timeRange: StartEndRange,
   +interval: Milliseconds,
@@ -84,6 +83,7 @@ type StateProps = {|
   +userTimings: MarkerIndex[],
   +timelineMarginLeft: CssPixels,
   +displayStackType: boolean,
+  +hasFilteredCtssSamples: boolean,
 |};
 
 type DispatchProps = {|
@@ -181,8 +181,7 @@ class StackChartImpl extends React.PureComponent<Props> {
       event.preventDefault();
       const { callNodeInfo, selectedCallNodeIndex, thread } = this.props;
       if (selectedCallNodeIndex !== null) {
-        const callNodeTable = callNodeInfo.getCallNodeTable();
-        const funcIndex = callNodeTable.func[selectedCallNodeIndex];
+        const funcIndex = callNodeInfo.funcForNode(selectedCallNodeIndex);
         const funcName = thread.stringTable.getString(
           thread.funcTable.name[funcIndex]
         );
@@ -204,7 +203,6 @@ class StackChartImpl extends React.PureComponent<Props> {
     const {
       thread,
       threadsKey,
-      maxStackDepthPlusOne,
       combinedTimingRows,
       timeRange,
       interval,
@@ -221,9 +219,10 @@ class StackChartImpl extends React.PureComponent<Props> {
       weightType,
       timelineMarginLeft,
       displayStackType,
+      hasFilteredCtssSamples,
     } = this.props;
 
-    const maxViewportHeight = maxStackDepthPlusOne * STACK_FRAME_HEIGHT;
+    const maxViewportHeight = combinedTimingRows.length * STACK_FRAME_HEIGHT;
 
     return (
       <div
@@ -234,7 +233,7 @@ class StackChartImpl extends React.PureComponent<Props> {
       >
         <StackSettings hideInvertCallstack={true} />
         <TransformNavigator />
-        {maxStackDepthPlusOne === 0 && userTimings.length === 0 ? (
+        {!hasFilteredCtssSamples && userTimings.length === 0 ? (
           <StackChartEmptyReasons />
         ) : (
           <ContextMenuTrigger
@@ -300,8 +299,6 @@ export const StackChart = explicitConnect<{||}, StateProps, DispatchProps>({
       thread: selectedThreadSelectors.getFilteredThread(state),
       // Use the raw WeightType here, as the stack chart does not use the call tree
       weightType: selectedThreadSelectors.getSamplesWeightType(state),
-      maxStackDepthPlusOne:
-        selectedThreadSelectors.getFilteredCallNodeMaxDepthPlusOne(state),
       combinedTimingRows,
       timeRange: getCommittedRange(state),
       interval: getProfileInterval(state),
@@ -319,6 +316,8 @@ export const StackChart = explicitConnect<{||}, StateProps, DispatchProps>({
       userTimings: selectedThreadSelectors.getUserTimingMarkerIndexes(state),
       timelineMarginLeft: getTimelineMarginLeft(state),
       displayStackType: getProfileUsesMultipleStackTypes(state),
+      hasFilteredCtssSamples:
+        selectedThreadSelectors.getHasFilteredCtssSamples(state),
     };
   },
   mapDispatchToProps: {

@@ -121,6 +121,7 @@ CallNodeContextMenu--searchfox = Шукати назву функції у Searc
 CallNodeContextMenu--copy-function-name = Скопіювати назву функції
 CallNodeContextMenu--copy-script-url = Скопіювати URL-адресу скрипту
 CallNodeContextMenu--copy-stack = Копіювати стек
+CallNodeContextMenu--show-the-function-in-devtools = Показати функцію в інструментах розробника
 
 ## CallTree
 ## This is the component for Call Tree panel.
@@ -338,6 +339,15 @@ Home--load-files-from-other-tools2 =
     Панель швидкодії Chrome, <androidstudio>Android Studio</androidstudio>, або
     з будь-якого файлу в форматі <dhat>dhat</dhat> чи <traceevent>Google’s Trace Event</traceevent>.
     <write>Навчіться записувати власний імпортер</write>.
+Home--install-chrome-extension = Встановіть розширення Chrome
+Home--chrome-extension-instructions =
+    Використовуйте розширення <a>{ -profiler-brand-name } для Chrome</a>
+    для фіксації профілів продуктивності в Chrome та їх аналізу в
+    { -profiler-brand-name }. Установіть розширення з вебмагазину Chrome.
+Home--chrome-extension-recording-instructions =
+    Після встановлення використовуйте піктограму розширення на панелі інструментів
+    або ярлики для запуску та зупинки профілювання. Ви також можете
+    експортувати профілі та завантажити їх тут для детального аналізу.
 
 ## IdleSearchField
 ## The component that is used for all the search inputs in the application.
@@ -629,6 +639,14 @@ NumberFormat--short-date = { SHORTDATE($date) }
 ## The component that is used for all the search input hints in the application.
 
 PanelSearch--search-field-hint = Чи знаєте ви, що для пошуку кількох термінів можна використовувати кому (,)?
+
+## Profile Name Button
+
+ProfileName--edit-profile-name-button =
+    .title = Змінити назву профілю
+ProfileName--edit-profile-name-input =
+    .title = Змінити назву профілю
+    .aria-label = Назва профілю
 
 ## Profile Delete Button
 

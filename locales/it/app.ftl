@@ -90,6 +90,7 @@ CallNodeContextMenu--searchfox = Cerca la funzione in Searchfox
 CallNodeContextMenu--copy-function-name = Copia nome della funzione
 CallNodeContextMenu--copy-script-url = Copia URL dello script
 CallNodeContextMenu--copy-stack = Copia stack
+CallNodeContextMenu--show-the-function-in-devtools = Mostra la funzione in DevTools
 
 ## CallTree
 ## This is the component for Call Tree panel.
@@ -553,6 +554,14 @@ NumberFormat--short-date = { SHORTDATE($date) }
 ## The component that is used for all the search input hints in the application.
 
 PanelSearch--search-field-hint = Lo sapevi che è possibile utilizzare una virgola per separare più termini di ricerca?
+
+## Profile Name Button
+
+ProfileName--edit-profile-name-button =
+    .title = Modifica nome del profilo
+ProfileName--edit-profile-name-input =
+    .title = Modifica nome del profilo
+    .aria-label = Nome del profilo
 
 ## Profile Delete Button
 

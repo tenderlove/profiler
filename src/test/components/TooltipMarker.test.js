@@ -22,6 +22,7 @@ import { selectedThreadSelectors } from 'firefox-profiler/selectors/per-thread';
 import { getSelectedThreadsKey } from 'firefox-profiler/selectors/url-state';
 import { changeSelectedThreads } from 'firefox-profiler/actions/profile-view';
 import { getEmptyThread } from '../../profile-logic/data-structures';
+import { StringTable } from 'firefox-profiler/utils/string-table';
 import { ensureExists } from 'firefox-profiler/utils/flow';
 import type { NetworkPayload } from 'firefox-profiler/types';
 
@@ -808,6 +809,22 @@ describe('TooltipMarker', function () {
     expect(getValueForProperty('Class of Service')).toBe('Leader');
   });
 
+  it('does not render a hidden field in a marker', () => {
+    setupWithPayload([
+      [
+        'Marker with hidden string',
+        1,
+        2,
+        {
+          type: 'MarkerWithHiddenField',
+          hiddenString: 'test',
+        },
+      ],
+    ]);
+
+    expect(screen.queryByText('Hidden string')).not.toBeInTheDocument();
+  });
+
   it('renders page information for pages with multiple class of service flags', () => {
     setupWithPayload(
       getNetworkMarkers({
@@ -829,6 +846,48 @@ describe('TooltipMarker', function () {
     expect(getValueForProperty('Class of Service')).toBe(
       'Unblocked | Throttleable | TailForbidden'
     );
+  });
+
+  it('renders page information for pages with request status', () => {
+    setupWithPayload(
+      getNetworkMarkers({
+        id: 1235,
+        startTime: 19000,
+        fetchStart: 19200.2,
+        endTime: 20433.8,
+        uri: 'https://example.org/index.html',
+        payload: {
+          cache: 'Hit',
+          pri: 8,
+          count: 47027,
+          contentType: 'text/html',
+          requestStatus: 'NS_OK',
+        },
+      })
+    );
+
+    expect(getValueForProperty('Request Status')).toBe('NS_OK');
+  });
+
+  it('renders page information for pages with response status code', () => {
+    setupWithPayload(
+      getNetworkMarkers({
+        id: 1235,
+        startTime: 19000,
+        fetchStart: 19200.2,
+        endTime: 20433.8,
+        uri: 'https://example.org/index.html',
+        payload: {
+          cache: 'Hit',
+          pri: 8,
+          count: 47027,
+          contentType: 'text/html',
+          responseStatus: 403,
+        },
+      })
+    );
+
+    expect(getValueForProperty('Response Status Code')).toBe('403');
   });
 
   it('renders properly network markers with a preconnect part', () => {
@@ -1051,9 +1110,10 @@ describe('TooltipMarker', function () {
   it('shows image of CompositorScreenshot markers', function () {
     const { profile } = getProfileFromTextSamples(`A`);
     const thread = profile.threads[0];
+    const stringTable = StringTable.withBackingArray(thread.stringArray);
 
     const screenshotUrl = 'Screenshot Url';
-    const screenshotUrlIndex = thread.stringTable.indexForString(screenshotUrl);
+    const screenshotUrlIndex = stringTable.indexForString(screenshotUrl);
     addMarkersToThreadWithCorrespondingSamples(thread, [
       [
         'CompositorScreenshot',
@@ -1155,8 +1215,10 @@ describe('TooltipMarker', function () {
     ]);
 
     const screenshotUrl = 'Screenshot Url';
-    const screenshotUrlIndex =
-      profile.threads[1].stringTable.indexForString(screenshotUrl);
+    const thread1StringTable = StringTable.withBackingArray(
+      profile.threads[1].stringArray
+    );
+    const screenshotUrlIndex = thread1StringTable.indexForString(screenshotUrl);
     addMarkersToThreadWithCorrespondingSamples(profile.threads[1], [
       [
         'DOMEvent',

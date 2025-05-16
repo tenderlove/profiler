@@ -90,6 +90,7 @@ CallNodeContextMenu--searchfox = 用 Searchfox 搜尋函數名稱
 CallNodeContextMenu--copy-function-name = 複製函數名稱
 CallNodeContextMenu--copy-script-url = 複製指令碼網址
 CallNodeContextMenu--copy-stack = 複製堆疊
+CallNodeContextMenu--show-the-function-in-devtools = 於開發者工具中顯示函數
 
 ## CallTree
 ## This is the component for Call Tree panel.
@@ -262,7 +263,7 @@ Home--load-files-from-other-tools2 =
     { -profiler-brand-name } 也可以匯入其他效能檢測器，例如 <perf>Linux perf</perf>、<simpleperf>Android SimplePerf</simpleperf>、Chrome 效能面板、<androidstudio>Android Studio</androidstudio> 所產生的效能檢測檔、任何使用 <dhat>dhat 格式</dhat> 或 <traceevent>Google 的 Trace Event
     格式</traceevent>儲存的效能檢測檔。<write>點擊此處了解如何撰寫您自己的匯入程式</write>。
 Home--install-chrome-extension = 安裝 Chrome 擴充套件
-Home--chrome-extension-instructions = 可使用 <a>Chrome 的 { -profiler-brand-name } 擴充套件</a>，在 Chrome 當中捕捉效能紀錄檔，再使用 { -profiler-brand-name } 進行分析。請到 Chrome 線上應用程式安裝此套件。
+Home--chrome-extension-instructions = 可使用 <a>Chrome 的 { -profiler-brand-name } 擴充套件</a>，在 Chrome 當中捕捉效能紀錄檔，再使用 { -profiler-brand-name } 進行分析。請到 Chrome 線上應用程式商店安裝此套件。
 Home--chrome-extension-recording-instructions = 安裝完成後，即可使用擴充套件在工具列新增的圖示或快速鍵開始或停止捕捉效能紀錄。您也可以匯出檢測檔，匯入此處，進行更詳細的分析。
 
 ## IdleSearchField
@@ -544,6 +545,14 @@ NumberFormat--short-date = { SHORTDATE($date) }
 ## The component that is used for all the search input hints in the application.
 
 PanelSearch--search-field-hint = 您知道可以使用半形逗號（,）搜尋多個詞彙嗎？
+
+## Profile Name Button
+
+ProfileName--edit-profile-name-button =
+    .title = 編輯效能檢測檔名稱
+ProfileName--edit-profile-name-input =
+    .title = 編輯效能檢測檔名稱
+    .aria-label = 效能檢測檔名稱
 
 ## Profile Delete Button
 

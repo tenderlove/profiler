@@ -90,6 +90,7 @@ CallNodeContextMenu--searchfox = Rechercher le nom de la fonction sur Searchfox
 CallNodeContextMenu--copy-function-name = Copier le nom de la fonction
 CallNodeContextMenu--copy-script-url = Copier l’URL du script
 CallNodeContextMenu--copy-stack = Copier la pile
+CallNodeContextMenu--show-the-function-in-devtools = Afficher la fonction dans les outils de développement
 
 ## CallTree
 ## This is the component for Call Tree panel.
@@ -271,6 +272,12 @@ Home--load-files-from-other-tools2 =
     Panneau de performances Chrome, <androidstudio>Android Studio</androidstudio>, ou
     tout fichier utilisant les formats <dhat>dhat</dhat> ou <traceevent>Trace Event de Google</traceevent>. <write>Apprenez à écrire votre
     propre importateur</write>.
+Home--install-chrome-extension = Installer l’extension Chrome
+Home--chrome-extension-instructions =
+    Utilisez l’extension <a>{ -profiler-brand-name } pour Chrome</a>
+    pour capturer des profils de performance dans Chrome et les analyser dans le
+    { -profiler-brand-name }. Installez l’extension depuis le Chrome Web Store.
+Home--chrome-extension-recording-instructions = Une fois l’extension installée, utilisez l’icône de la barre d’outils ou les raccourcis pour démarrer et arrêter le profilage. Vous pouvez également exporter des profils et les charger ici pour une analyse détaillée.
 
 ## IdleSearchField
 ## The component that is used for all the search inputs in the application.
@@ -556,6 +563,14 @@ NumberFormat--short-date = { SHORTDATE($date) }
 ## The component that is used for all the search input hints in the application.
 
 PanelSearch--search-field-hint = Saviez-vous que vous pouvez utiliser la virgule (,) pour effectuer une recherche à l’aide de plusieurs termes ?
+
+## Profile Name Button
+
+ProfileName--edit-profile-name-button =
+    .title = Modifier le nom du profil
+ProfileName--edit-profile-name-input =
+    .title = Modifier le nom du profil
+    .aria-label = Nom du profil
 
 ## Profile Delete Button
 

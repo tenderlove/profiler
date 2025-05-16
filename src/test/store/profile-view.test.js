@@ -52,12 +52,13 @@ import {
   processCounter,
   type BreakdownByCategory,
 } from '../../profile-logic/profile-data';
+import { getSelfAndTotalForCallNode } from '../../profile-logic/call-tree';
 
 import type {
   TrackReference,
   Milliseconds,
   TabID,
-  Thread,
+  RawThread,
   StartEndRange,
 } from 'firefox-profiler/types';
 
@@ -1850,6 +1851,8 @@ describe('snapshots of selectors/profile', function () {
     samplesThread.samples.length = eventDelay.length;
 
     const { getState, dispatch } = storeWithProfile(profile);
+    const samplesDerivedThread = selectedThreadSelectors.getThread(getState());
+
     const mergeFunction = {
       type: 'merge-function',
       funcIndex: C,
@@ -1870,7 +1873,7 @@ describe('snapshots of selectors/profile', function () {
     return {
       getState,
       dispatch,
-      samplesThread,
+      samplesThread: samplesDerivedThread,
       mergeFunction,
       markerThreadSelectors: getThreadSelectors(1),
       getMarker: getThreadSelectors(1).getMarkerGetter(getState()),
@@ -2031,15 +2034,6 @@ describe('snapshots of selectors/profile', function () {
     const { getState } = setupStore();
     expect(
       selectedThreadSelectors.getFilteredCallNodeMaxDepthPlusOne(getState())
-    ).toEqual(4);
-  });
-
-  it('matches the last stored run of selectedThreadSelector.getPreviewFilteredCallNodeMaxDepthPlusOne', function () {
-    const { getState } = setupStore();
-    expect(
-      selectedThreadSelectors.getPreviewFilteredCallNodeMaxDepthPlusOne(
-        getState()
-      )
     ).toEqual(4);
   });
 
@@ -2212,7 +2206,7 @@ describe('getTimingsForSidebar', () => {
       B    B                  B             B             B              B
       Cjs  Cjs                Cjs           Cjs           H[cat:Layout]  H[cat:Layout]
       D    D                  D             F             I[cat:Idle]
-      E    Ejs[jit:baseline]  Ejs[jit:ion]  Ejs[jit:ion]
+      E    Ejs                Ejs           Ejs
     `;
   }
 
@@ -2254,7 +2248,6 @@ describe('getTimingsForSidebar', () => {
 
   const EMPTY_TIMING = {
     value: 0,
-    breakdownByImplementation: null,
     breakdownByCategory: null,
   };
 
@@ -2272,7 +2265,6 @@ describe('getTimingsForSidebar', () => {
         selfTime: EMPTY_TIMING,
         totalTime: {
           value: 5,
-          breakdownByImplementation: { native: 2, baseline: 1, ion: 2 },
           breakdownByCategory: withSingleSubcategory([
             0, // Other
             1, // Idle
@@ -2307,7 +2299,6 @@ describe('getTimingsForSidebar', () => {
         forPath: {
           selfTime: {
             value: 2,
-            breakdownByImplementation: { ion: 1, baseline: 1 },
             breakdownByCategory: withSingleSubcategory([
               0, // Idle
               0, // Other
@@ -2321,7 +2312,6 @@ describe('getTimingsForSidebar', () => {
           },
           totalTime: {
             value: 2,
-            breakdownByImplementation: { ion: 1, baseline: 1 },
             breakdownByCategory: withSingleSubcategory([
               0, // Idle
               0, // Other
@@ -2351,7 +2341,6 @@ describe('getTimingsForSidebar', () => {
       const expectedTiming = {
         selfTime: {
           value: 1,
-          breakdownByImplementation: { native: 1 },
           breakdownByCategory: withSingleSubcategory([
             0,
             0,
@@ -2365,7 +2354,6 @@ describe('getTimingsForSidebar', () => {
         },
         totalTime: {
           value: 2,
-          breakdownByImplementation: { native: 2 },
 
           breakdownByCategory: withSingleSubcategory([
             0, // Other
@@ -2409,7 +2397,6 @@ describe('getTimingsForSidebar', () => {
       expect(timings.rootTime).toEqual(2);
       expect(timings.forPath.totalTime).toEqual({
         value: 2,
-        breakdownByImplementation: { native: 1, ion: 1 },
         breakdownByCategory: withSingleSubcategory([
           0, // Other
           1, // Idle
@@ -2429,7 +2416,7 @@ describe('getTimingsForSidebar', () => {
         // range in the setup.
         return `
           A    A    A              A             A
-          Bjs  Bjs  Bjs            Bjs[jit:ion]  Bjs[jit:blinterp]
+          Bjs  Bjs  Bjs            Bjs           Bjs
           C    C    C              E
                     D[cat:Layout]
         `;
@@ -2448,12 +2435,6 @@ describe('getTimingsForSidebar', () => {
           selfTime: EMPTY_TIMING,
           totalTime: {
             value: 4,
-            breakdownByImplementation: {
-              interpreter: 1,
-              native: 1,
-              ion: 1,
-              blinterp: 1,
-            },
             breakdownByCategory: withSingleSubcategory([
               0,
               0,
@@ -2483,7 +2464,6 @@ describe('getTimingsForSidebar', () => {
         const expectedTiming = {
           selfTime: {
             value: 1,
-            breakdownByImplementation: { blinterp: 1 },
             breakdownByCategory: withSingleSubcategory([
               0,
               0,
@@ -2497,12 +2477,6 @@ describe('getTimingsForSidebar', () => {
           },
           totalTime: {
             value: 4,
-            breakdownByImplementation: {
-              ion: 1,
-              blinterp: 1,
-              interpreter: 1,
-              native: 1,
-            },
             breakdownByCategory: withSingleSubcategory([
               0,
               0,
@@ -2535,7 +2509,6 @@ describe('getTimingsForSidebar', () => {
         // We extract the expectations to make this a bit more readable.
         const expectedTiming = {
           value: 1,
-          breakdownByImplementation: { ion: 1 },
           breakdownByCategory: withSingleSubcategory([
             0,
             0,
@@ -2564,7 +2537,6 @@ describe('getTimingsForSidebar', () => {
         const expectedTiming = {
           selfTime: {
             value: 1,
-            breakdownByImplementation: { interpreter: 1 },
             breakdownByCategory: withSingleSubcategory([
               0,
               0,
@@ -2578,10 +2550,6 @@ describe('getTimingsForSidebar', () => {
           },
           totalTime: {
             value: 2,
-            breakdownByImplementation: {
-              interpreter: 1,
-              native: 1,
-            },
             breakdownByCategory: withSingleSubcategory([
               0,
               0,
@@ -2614,7 +2582,6 @@ describe('getTimingsForSidebar', () => {
         // We extract the expectations to make this a bit more readable.
         const expectedTiming = {
           value: 1,
-          breakdownByImplementation: { native: 1 },
           breakdownByCategory: withSingleSubcategory([
             0,
             0,
@@ -2661,7 +2628,6 @@ describe('getTimingsForSidebar', () => {
       // A root node will have the same values for total and selftime.
       const expectedTiming = {
         value: 3,
-        breakdownByImplementation: { ion: 2, baseline: 1 },
         breakdownByCategory: withSingleSubcategory([
           0, // Idle
           0, // Other
@@ -2699,7 +2665,6 @@ describe('getTimingsForSidebar', () => {
           selfTime: EMPTY_TIMING,
           totalTime: {
             value: 2,
-            breakdownByImplementation: { ion: 1, baseline: 1 },
             breakdownByCategory: withSingleSubcategory([
               0,
               0,
@@ -2732,7 +2697,6 @@ describe('getTimingsForSidebar', () => {
           },
           totalTime: {
             value: 1,
-            breakdownByImplementation: { native: 1 },
             breakdownByCategory: withSingleSubcategory([
               0,
               0,
@@ -2755,7 +2719,6 @@ describe('getTimingsForSidebar', () => {
           selfTime: EMPTY_TIMING,
           totalTime: {
             value: 1,
-            breakdownByImplementation: { native: 1 },
             breakdownByCategory: withSingleSubcategory([
               0,
               1, // Idle
@@ -2783,7 +2746,6 @@ describe('getTimingsForSidebar', () => {
           selfTime: EMPTY_TIMING,
           totalTime: {
             value: 1,
-            breakdownByImplementation: { native: 1 },
             breakdownByCategory: withSingleSubcategory([
               0,
               0,
@@ -2823,7 +2785,6 @@ describe('getTimingsForSidebar', () => {
       expect(timings.rootTime).toEqual(2);
       expect(timings.forPath.totalTime).toEqual({
         value: 1,
-        breakdownByImplementation: { ion: 1 },
         breakdownByCategory: withSingleSubcategory([
           0, // Other
           0, // Idle
@@ -2843,15 +2804,15 @@ describe('getTimingsForSidebar', () => {
         // range in the setup.
         return `
           A    A    A              A             A
-          Bjs  Bjs  Bjs            Bjs[jit:ion]  Bjs[jit:blinterp]
+          Bjs  Bjs  Bjs            Bjs           Bjs
           C    C    C              E
                     D[cat:Layout]
         `;
 
-        // This is how the inverted tree looks like:
+        // This is what the inverted tree looks like:
         //
-        // C    C    D[cat:Layout]  E             Bjs[jit:blinterp]
-        // Bjs  Bjs  C              Bjs[jit:ion]  A
+        // C    C    D[cat:Layout]  E             Bjs
+        // Bjs  Bjs  C              Bjs           A
         // A    A    Bjs            A
         //           A
       }
@@ -2870,7 +2831,6 @@ describe('getTimingsForSidebar', () => {
         // We extract the expectations to make this a bit more readable.
         const expectedTiming = {
           value: 1,
-          breakdownByImplementation: { native: 1 },
           breakdownByCategory: withSingleSubcategory([
             0,
             0,
@@ -2911,7 +2871,6 @@ describe('getTimingsForSidebar', () => {
         // We extract the expectations to make this a bit more readable.
         const expectedTiming = {
           value: 1,
-          breakdownByImplementation: { ion: 1 },
           breakdownByCategory: withSingleSubcategory([
             0,
             0,
@@ -2951,9 +2910,6 @@ describe('getTimingsForSidebar', () => {
             selfTime: EMPTY_TIMING,
             totalTime: {
               value: 1,
-              breakdownByImplementation: {
-                native: 1,
-              },
               breakdownByCategory: withSingleSubcategory([
                 0,
                 0,
@@ -3012,10 +2968,6 @@ describe('getTimingsForSidebar', () => {
         selfTime: EMPTY_TIMING,
         totalTime: {
           breakdownByCategory: withSingleSubcategory([0, 0, -1, 1, 0, 0, 0, 0]), // Other, Idle, Layout, JavaScript, etc.
-          breakdownByImplementation: {
-            interpreter: 1,
-            native: -1,
-          },
           value: 0,
         },
       });
@@ -3063,10 +3015,6 @@ describe('getTimingsForSidebar', () => {
         selfTime: EMPTY_TIMING,
         totalTime: {
           breakdownByCategory: withSingleSubcategory([0, 0, 7, 5, 0, 0, 0, 0]), // Other, Idle, Layout, JavaScript, etc
-          breakdownByImplementation: {
-            native: 7,
-            interpreter: 5,
-          },
           value: 12,
         },
       });
@@ -3077,7 +3025,7 @@ describe('getTimingsForSidebar', () => {
 // Verify that getFriendlyThreadName gives the expected names for threads with or without processName.
 describe('getFriendlyThreadName', function () {
   // Setup a profile with threads based on the given overrides.
-  function setup(threadOverrides: Array<$Shape<Thread>>) {
+  function setup(threadOverrides: Array<$Shape<RawThread>>) {
     const profile = getEmptyProfile();
     for (const threadOverride of threadOverrides) {
       profile.threads.push(getEmptyThread(threadOverride));
@@ -3636,7 +3584,7 @@ describe('traced timing', function () {
 
     const callNodeInfo = selectedThreadSelectors.getCallNodeInfo(getState());
 
-    const { total, self } = ensureExists(
+    const tracedTiming = ensureExists(
       selectedThreadSelectors.getTracedTiming(getState()),
       'Expected to get a traced timing.'
     );
@@ -3647,7 +3595,11 @@ describe('traced timing', function () {
         const callNodeIndex = ensureExists(
           callNodeInfo.getCallNodeIndexFromPath(callNodePath)
         );
-        return { self: self[callNodeIndex], total: total[callNodeIndex] };
+        return getSelfAndTotalForCallNode(
+          callNodeIndex,
+          callNodeInfo,
+          tracedTiming
+        );
       },
       profile,
     };
@@ -3716,7 +3668,7 @@ describe('traced timing', function () {
     // Create a weighted samples table.
     const [{ samples }] = profile.threads;
     samples.weightType = 'tracing-ms';
-    samples.weight = samples.time.map(() => 1);
+    samples.weight = samples.stack.map(() => 1);
 
     const { getState } = storeWithProfile(profile);
     expect(selectedThreadSelectors.getTracedTiming(getState())).toBe(null);

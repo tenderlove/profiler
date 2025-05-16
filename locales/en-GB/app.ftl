@@ -121,6 +121,7 @@ CallNodeContextMenu--searchfox = Look up the function name on Searchfox
 CallNodeContextMenu--copy-function-name = Copy function name
 CallNodeContextMenu--copy-script-url = Copy script URL
 CallNodeContextMenu--copy-stack = Copy stack
+CallNodeContextMenu--show-the-function-in-devtools = Show the function in DevTools
 
 ## CallTree
 ## This is the component for Call Tree panel.
@@ -637,6 +638,14 @@ NumberFormat--short-date = { SHORTDATE($date) }
 ## The component that is used for all the search input hints in the application.
 
 PanelSearch--search-field-hint = Did you know you can use the comma (,) to search using several terms?
+
+## Profile Name Button
+
+ProfileName--edit-profile-name-button =
+    .title = Edit the profile name
+ProfileName--edit-profile-name-input =
+    .title = Edit the profile name
+    .aria-label = Profile name
 
 ## Profile Delete Button
 

@@ -14,6 +14,7 @@ import { fireEvent } from '@testing-library/react';
 
 import { render } from 'firefox-profiler/test/fixtures/testing-library';
 import { TrackCustomMarker } from '../../components/timeline/TrackCustomMarker';
+import { StringTable } from '../../utils/string-table';
 import { ensureExists } from '../../utils/flow';
 
 import {
@@ -53,14 +54,16 @@ function setup() {
   const { profile } = getProfileFromTextSamples(
     Array(SAMPLE_COUNT).fill('A').join('  ')
   );
-  const markerStringIndex =
-    profile.threads[0].stringTable.indexForString('Marker');
+  const stringTable = StringTable.withBackingArray(
+    profile.threads[0].stringArray
+  );
+  const markerStringIndex = stringTable.indexForString('Marker');
   const threadIndex = 0;
   const thread = profile.threads[threadIndex];
   profile.meta.markerSchema.push({
     name: 'Marker',
     display: ['marker-chart', 'marker-table', 'timeline-memory'],
-    data: [
+    fields: [
       { key: 'first', label: 'first', format: 'integer', searchable: true },
       { key: 'second', label: 'second', format: 'integer', searchable: true },
     ],
