@@ -4,7 +4,6 @@
 
 import { assertExhaustiveCheck } from 'firefox-profiler/utils/types';
 import { tryLoadRubyHooks } from 'firefox-profiler/utils/ruby-hooks';
-// @flow
 
 export type ParsedFileNameFromSymbolication =
   | {
