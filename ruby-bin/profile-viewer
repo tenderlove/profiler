@@ -78,12 +78,53 @@ unless File.exist?(ARGV[0])
   exit(2)
 end
 
-port = 0
-profile_paths = []
-server = WEBrick::HTTPServer.new :Port => port,
+def process_argv server
+  valid_files = Set.new
+  port = server.config[:Port]
+
+  profile_paths = []
+
+  ARGV.each.with_index do |profile, index|
+    full_path = File.expand_path profile
+
+    is_gzipped = File.binread(full_path, 2) == "\x1F\x8B".b
+    content = if is_gzipped
+      require "zlib"
+      Zlib::GzipReader.open(full_path) { |gz| gz.read }
+    else
+      File.read full_path
+    end
+    parsed_file = JSON.parse content
+
+    parsed_file["threads"].each do |thread|
+      thread["stringArray"].map! do |str|
+        if str.start_with?("/") && File.exist?(str)
+          valid_files << str
+          "http://localhost:#{port}/source#{str}"
+        else
+          str
+        end
+      end
+    end
+
+    uri_path = "/profile#{index unless ARGV.size == 1}"
+    $stderr.puts "Mounting #{full_path} at #{uri_path}"
+    server.mount uri_path, Profile, full_path, parsed_file
+    profile_paths << uri_path
+  end
+
+  unless valid_files.empty?
+    server.mount "/source", Source, valid_files
+  end
+
+  profile_paths
+end
+
+server = WEBrick::HTTPServer.new :Port => 0,
   :DocumentRoot => HTTP_ROOT,
   :StartCallback => lambda {
     port = server.config[:Port]
+    profile_paths = process_argv(server)
     profile_paths.each do |path|
       should_get = "http://localhost:#{port}/from-url/" + CGI.escape("http://localhost:#{port}#{path}")
       system("open #{should_get}")
@@ -93,40 +134,5 @@ server = WEBrick::HTTPServer.new :Port => port,
 trap 'INT' do server.shutdown end
 
 server.mount "/from-url", GetIndex
-
-valid_files = Set.new
-
-ARGV.each.with_index do |profile, index|
-  full_path = File.expand_path profile
-
-  is_gzipped = File.binread(full_path, 2) == "\x1F\x8B".b
-  content = if is_gzipped
-    require "zlib"
-    Zlib::GzipReader.open(full_path) { |gz| gz.read }
-  else
-    File.read full_path
-  end
-  parsed_file = JSON.parse content
-
-  parsed_file["threads"].each do |thread|
-    thread["stringArray"].map! do |str|
-      if str.start_with?("/") && File.exist?(str)
-        valid_files << str
-        "http://localhost:#{port}/source#{str}"
-      else
-        str
-      end
-    end
-  end
-
-  uri_path = "/profile#{index unless ARGV.size == 1}"
-  $stderr.puts "Mounting #{full_path} at #{uri_path}"
-  server.mount uri_path, Profile, full_path, parsed_file
-  profile_paths << uri_path
-end
-
-unless valid_files.empty?
-  server.mount "/source", Source, valid_files
-end
 
 server.start

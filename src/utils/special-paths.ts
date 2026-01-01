@@ -90,8 +90,8 @@ const s3PathRegex =
   /^s3:(?<bucket>[^:]*):(?<digest>[0-9a-f]*)\/(?<path>[^:]*):$/;
 const cargoPathRegex =
   /^cargo:(?<registry>[^:]*):(?<crate>[^/]+)-(?<version>[0-9]+\.[0-9]+\.[0-9]+):(?<path>[^:]*)$/;
-const localhostPathRegex = new RegExp(
-  "^(?<host>" + PROFILER_SERVER_ORIGIN + ")\/source(?<path>.*)$");
+const localhostPathRegex =
+  /^(?<host>http:\/\/localhost:\d+)\/source(?<path>.*)$/;
 const gemPathRegex =
   /^gem:(?<gem>[A-Za-z0-9\-_\.]+):(?<path>[^:]*)$/;
 const rubyextlibPathRegex =
