@@ -18,4 +18,5 @@ Gem::Specification.new do |s|
   s.metadata    = { "source_code_uri" => "https://github.com/tenderlove/profiler/tree/ruby" }
   s.add_runtime_dependency 'webrick'
   s.add_runtime_dependency 'optparse'
+  s.add_runtime_dependency 'uri'
 end

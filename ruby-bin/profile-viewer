@@ -2,9 +2,9 @@
 
 require "webrick"
 require "json"
-require "cgi"
 require "optparse"
 require "socket"
+require "uri"
 
 HTTP_ROOT = File.expand_path File.join(__dir__, "..", "dist")
 
@@ -126,7 +126,7 @@ server = WEBrick::HTTPServer.new :Port => 0,
     port = server.config[:Port]
     profile_paths = process_argv(server)
     profile_paths.each do |path|
-      should_get = "http://localhost:#{port}/from-url/" + CGI.escape("http://localhost:#{port}#{path}")
+      should_get = "http://localhost:#{port}/from-url/" + URI.encode_www_form_component("http://localhost:#{port}#{path}")
       system("open #{should_get}")
     end
   }
