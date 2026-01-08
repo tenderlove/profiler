@@ -98,7 +98,9 @@ def process_argv server
 
     parsed_file["threads"].each do |thread|
       thread["stringArray"].map! do |str|
-        if str.start_with?("/") && File.exist?(str)
+        str = File.expand_path(str) if File.exist?(str)
+
+        if str.start_with?("/")
           valid_files << str
           "http://localhost:#{port}/source#{str}"
         else
