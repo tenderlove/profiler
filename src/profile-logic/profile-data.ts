@@ -25,7 +25,13 @@ import {
 } from 'firefox-profiler/app-logic/constants';
 import { timeCode } from 'firefox-profiler/utils/time-code';
 import { bisectionRight, bisectionLeft } from 'firefox-profiler/utils/bisect';
-import { checkBit, makeBitSet, setBit } from 'firefox-profiler/utils/bitset';
+import {
+  type BitSet,
+  checkBit,
+  combineTwoBitSetsWithAnd,
+  makeBitSet,
+  setBit,
+} from 'firefox-profiler/utils/bitset';
 import { parseFileNameFromSymbolication } from 'firefox-profiler/utils/special-paths';
 import {
   ensureExists,
@@ -35,8 +41,6 @@ import {
   numberSeriesFromDeltas,
   numberSeriesToDeltas,
 } from 'firefox-profiler/utils/number-series';
-import ExtensionFavicon from '../../res/img/svg/extension-outline.svg';
-import DefaultLinkFavicon from '../../res/img/svg/globe.svg';
 
 import type { StringTable } from 'firefox-profiler/utils/string-table';
 import type {
@@ -91,12 +95,12 @@ import type {
   AddressProof,
   TimelineType,
   NativeSymbolInfo,
-  BottomBoxInfo,
   Bytes,
-  ThreadWithReservedFunctions,
+  FuncTableWithReservedFunctions,
   TabID,
   SourceTable,
   IndexIntoSourceTable,
+  TransformOutput,
 } from 'firefox-profiler/types';
 import type { CallNodeInfo, SuffixOrderIndex } from './call-node-info';
 
@@ -728,6 +732,159 @@ export function getNthPrefixStack(
     s = stackTablePrefixCol[s];
   }
   return s;
+}
+
+/**
+ * Given a call node `callNodeIndex`, answer, for each stack S:
+ * - Does a sample with stack S contribute to `callNodeIndex`'s total time?
+ * - If so, which of `callNodeIndex`'s frames does such a sample contribute its
+ *   total time to?
+ *
+ * If the answer to the first question is "no", we put frame index -1 into the
+ * returned array for that stack index.
+ */
+export function getCallNodeFramePerStack(
+  callNodeIndex: IndexIntoCallNodeTable,
+  callNodeInfo: CallNodeInfo,
+  stackTable: StackTable
+): Int32Array {
+  const callNodeInfoInverted = callNodeInfo.asInverted();
+  return callNodeInfoInverted !== null
+    ? getCallNodeFramePerStackInverted(
+        callNodeIndex,
+        callNodeInfoInverted,
+        stackTable
+      )
+    : getCallNodeFramePerStackNonInverted(
+        callNodeIndex,
+        callNodeInfo,
+        stackTable
+      );
+}
+
+/**
+ * This function handles the non-inverted case of getCallNodeFramePerStack.
+ *
+ * Gathers the frames which are hit in a given call node by each stack,
+ * or -1 if the stack isn't in the call node's subtree.
+ *
+ * This is best explained with an example.
+ * Let the call node be the node for the call path [A, B, C].
+ * Let this be the stack tree:
+ *
+ *  - stack 0, func A, frame 100
+ *    - stack 1, func B, frame 110
+ *      - stack 2, func C, frame 120
+ *      - stack 3, func C, frame 130
+ *    - stack 4, func B, frame 140
+ *      - stack 5, func C, frame 150
+ *      - stack 6, func C, frame 160
+ *        - stack 7, func D, frame 170
+ *      - stack 8, func E, frame 180
+ *    - stack 9, func F, frame 190
+ *
+ * This maps to the following call tree:
+ *
+ *  - call node 0, func A
+ *    - call node 1, func B
+ *      - call node 2, func C
+ *        - call node 3, func D
+ *      - call node 4, func E
+ *   - call node 5, func F
+ *
+ * The call path [A, B, C] uniquely identifies call node 2.
+ * The following stacks all "collapse into" ("map to") call node 2:
+ * stack 2, 3, 5 and 6.
+ * Stack 7 maps to call node 3, which is a child of call node 2.
+ * Stacks 0, 1, 4, 8 and 9 are outside the call path [A, B, C].
+ *
+ * Stacks 2, 3, 4 and 5 all make a "total time" contribution to call
+ * node 2, to the frames 120, 130, 150, and 160, respectively.
+ * Stack 7 also contributes total time to call node 2, to frame 160.
+ * Stacks 0, 1, 4, 8 and 9 don't contribute to call node 2's total time.
+ *
+ * So this function returns the following array in the example:
+ * new Int32Array([-1, -1, 120, 130, -1, 150, 160, 160, -1, -1])
+ * // for stacks   0,  1,  2,   3,   4,  5,   6,   7,   8,  9
+ */
+export function getCallNodeFramePerStackNonInverted(
+  callNodeIndex: IndexIntoCallNodeTable,
+  callNodeInfo: CallNodeInfo,
+  stackTable: StackTable
+): Int32Array {
+  const stackIndexToCallNodeIndex =
+    callNodeInfo.getStackIndexToNonInvertedCallNodeIndex();
+
+  const { frame: frameCol, prefix: prefixCol, length: stackCount } = stackTable;
+
+  const callNodeFramePerStack = new Int32Array(stackCount);
+
+  // This loop takes advantage of the stack table's ordering:
+  // Prefix stacks are always visited before their descendants.
+  for (let stackIndex = 0; stackIndex < stackCount; stackIndex++) {
+    let frame = -1;
+    const callNodeForThisStack = stackIndexToCallNodeIndex[stackIndex];
+    if (callNodeForThisStack === callNodeIndex) {
+      frame = frameCol[stackIndex];
+    } else {
+      // We're either already in the call node's subtree, or we are
+      // outside the subtree. Either way, we can just inherit the frame
+      // that our prefix stack hits in this call node.
+      const prefix = prefixCol[stackIndex];
+      if (prefix !== null) {
+        frame = callNodeFramePerStack[prefix];
+      }
+    }
+
+    callNodeFramePerStack[stackIndex] = frame;
+  }
+  return callNodeFramePerStack;
+}
+
+/**
+ * This handles the inverted case of getCallNodeFramePerStack.
+ */
+export function getCallNodeFramePerStackInverted(
+  callNodeIndex: IndexIntoCallNodeTable,
+  callNodeInfo: CallNodeInfoInverted,
+  stackTable: StackTable
+): Int32Array {
+  const depth = callNodeInfo.depthForNode(callNodeIndex);
+  const [rangeStart, rangeEnd] =
+    callNodeInfo.getSuffixOrderIndexRangeForCallNode(callNodeIndex);
+  const stackIndexToCallNodeIndex =
+    callNodeInfo.getStackIndexToNonInvertedCallNodeIndex();
+  const stackTablePrefixCol = stackTable.prefix;
+  const suffixOrderIndexes = callNodeInfo.getSuffixOrderIndexes();
+
+  const callNodeFramePerStack = new Int32Array(stackTable.length);
+
+  for (let stackIndex = 0; stackIndex < stackTable.length; stackIndex++) {
+    let callNodeFrame = -1;
+
+    // Get the non-inverted call tree node for the (non-inverted) stack.
+    // For example, if the stack has the call path A -> B -> C,
+    // this will give us the node A -> B -> C in the non-inverted tree.
+    const thisStackCallNode = stackIndexToCallNodeIndex[stackIndex];
+    const thisStackSuffixOrderIndex = suffixOrderIndexes[thisStackCallNode];
+
+    if (
+      thisStackSuffixOrderIndex >= rangeStart &&
+      thisStackSuffixOrderIndex < rangeEnd
+    ) {
+      const stackForCallNode = getNthPrefixStack(
+        stackIndex,
+        depth,
+        stackTablePrefixCol
+      );
+      if (stackForCallNode !== null) {
+        callNodeFrame = stackTable.frame[stackForCallNode];
+      }
+    }
+
+    callNodeFramePerStack[stackIndex] = callNodeFrame;
+  }
+  return callNodeFramePerStack;
 }
 
 /**
@@ -1407,43 +1564,73 @@ export function toValidCallTreeSummaryStrategy(
 
 export function filterThreadByImplementation(
   thread: Thread,
-  implementation: string
+  implementation: ImplementationFilter
 ): Thread {
-  const { funcTable, stringTable } = thread;
+  const { stackTable, frameTable, funcTable, stringTable } = thread;
+  const transformOutput = computeTransformOutputForImplementationFilter(
+    stackTable,
+    frameTable,
+    funcTable,
+    stringTable,
+    implementation
+  );
+  return applyTransformOutputToThread(transformOutput, thread);
+}
 
+export function computeTransformOutputForImplementationFilter(
+  stackTable: StackTable,
+  frameTable: FrameTable,
+  funcTable: FuncTable,
+  stringTable: StringTable,
+  implementation: ImplementationFilter
+): TransformOutput {
   switch (implementation) {
     case 'cpp':
-      return _filterThreadByFunc(thread, (funcIndex) => {
-        // Return quickly if this is a JS frame.
-        if (funcTable.isJS[funcIndex]) {
-          return false;
+      return _computeTransformOutputForMergingFuncs(
+        stackTable,
+        frameTable,
+        (funcIndex) => {
+          // Return quickly if this is a JS frame.
+          if (funcTable.isJS[funcIndex]) {
+            return false;
+          }
+          // Regular C++ functions are associated with a resource that describes the
+          // shared library that these C++ functions were loaded from. Jitcode is not
+          // loaded from shared libraries but instead generated at runtime, so Jitcode
+          // frames are not associated with a shared library and thus have no resource
+          const locationString = stringTable.getString(
+            funcTable.name[funcIndex]
+          );
+          const isProbablyJitCode =
+            funcTable.resource[funcIndex] === -1 &&
+            locationString.startsWith('0x');
+          return !isProbablyJitCode;
         }
-        // Regular C++ functions are associated with a resource that describes the
-        // shared library that these C++ functions were loaded from. Jitcode is not
-        // loaded from shared libraries but instead generated at runtime, so Jitcode
-        // frames are not associated with a shared library and thus have no resource
-        const locationString = stringTable.getString(funcTable.name[funcIndex]);
-        const isProbablyJitCode =
-          funcTable.resource[funcIndex] === -1 &&
-          locationString.startsWith('0x');
-        return !isProbablyJitCode;
-      });
+      );
     case 'js':
-      return _filterThreadByFunc(thread, (funcIndex) => {
-        return funcTable.isJS[funcIndex] || funcTable.relevantForJS[funcIndex];
-      });
+      return _computeTransformOutputForMergingFuncs(
+        stackTable,
+        frameTable,
+        (funcIndex) => {
+          return (
+            funcTable.isJS[funcIndex] || funcTable.relevantForJS[funcIndex]
+          );
+        }
+      );
     default:
-      return thread;
+      return {
+        newStackTable: stackTable,
+        effectOnThreadData: {},
+      };
   }
 }
 
-function _filterThreadByFunc(
-  thread: Thread,
+function _computeTransformOutputForMergingFuncs(
+  stackTable: StackTable,
+  frameTable: FrameTable,
   shouldIncludeFuncInFilteredThread: (funcIndex: IndexIntoFuncTable) => boolean
-): Thread {
-  return timeCode('_filterThreadByFunc', () => {
-    const { stackTable, frameTable } = thread;
-
+): TransformOutput {
+  return timeCode('_computeTransformOutputForMergingFuncs', () => {
     const newStackTable: StackTable = {
       length: 0,
       frame: [],
@@ -1472,49 +1659,100 @@ function _filterThreadByFunc(
       }
     }
 
-    return updateThreadStacks(thread, newStackTable, (oldStack) => {
-      if (oldStack === null) {
+    return {
+      newStackTable,
+      effectOnThreadData: {
+        oldStackToNewStack,
+      },
+    };
+  });
+}
+
+export function applyTransformOutputToThread(
+  transformOutput: TransformOutput,
+  thread: Thread
+): Thread {
+  const { newStackTable, effectOnThreadData } = transformOutput;
+
+  return updateThreadStacks(thread, newStackTable, (oldStack) => {
+    if (oldStack === null) {
+      return null;
+    }
+    const { oldStackToNewStack, dropIfOldStackIsNot } = effectOnThreadData;
+    if (dropIfOldStackIsNot !== undefined) {
+      const shouldKeep = checkBit(dropIfOldStackIsNot, oldStack);
+      if (!shouldKeep) {
         return null;
       }
+    }
+    if (oldStackToNewStack !== undefined) {
       const newStack = oldStackToNewStack[oldStack];
       return newStack !== -1 ? newStack : null;
-    });
+    }
+    return oldStack;
   });
 }
 
-export function filterThreadToSearchStrings(
-  thread: Thread,
+export function computeTransformOutputForSearchStringFilter(
+  stackTable: StackTable,
+  frameTable: FrameTable,
+  funcTable: FuncTable,
+  resourceTable: ResourceTable,
+  sources: SourceTable,
+  stringTable: StringTable,
   searchStrings: string[] | null
-): Thread {
-  return timeCode('filterThreadToSearchStrings', () => {
-    if (!searchStrings || !searchStrings.length) {
-      return thread;
+): TransformOutput {
+  return timeCode('computeTransformOutputForSearchStringFilter', () => {
+    if (!searchStrings) {
+      return { newStackTable: stackTable, effectOnThreadData: {} };
     }
 
-    return searchStrings.reduce(
-      (accThread, searchString) =>
-        filterThreadToSearchString(accThread, searchString),
-      thread
-    );
+    const stackMatchesAllSearchStrings = searchStrings
+      .filter((s) => s)
+      .reduce(
+        (
+          stackMatchesPreviousSearchStrings: BitSet | undefined,
+          searchString: string
+        ) => {
+          const stackMatchesThisString = _computeStackMatchesSearchString(
+            stackTable,
+            frameTable,
+            funcTable,
+            resourceTable,
+            sources,
+            stringTable,
+            searchString
+          );
+          if (stackMatchesPreviousSearchStrings !== undefined) {
+            return combineTwoBitSetsWithAnd(
+              stackMatchesThisString,
+              stackMatchesPreviousSearchStrings
+            );
+          }
+          return stackMatchesThisString;
+        },
+        undefined
+      );
+
+    return {
+      newStackTable: stackTable,
+      effectOnThreadData: {
+        dropIfOldStackIsNot: stackMatchesAllSearchStrings,
+      },
+    };
   });
 }
 
-export function filterThreadToSearchString(
-  thread: Thread,
+function _computeStackMatchesSearchString(
+  stackTable: StackTable,
+  frameTable: FrameTable,
+  funcTable: FuncTable,
+  resourceTable: ResourceTable,
+  sources: SourceTable,
+  stringTable: StringTable,
   searchString: string
-): Thread {
-  if (!searchString) {
-    return thread;
-  }
+): BitSet {
   const lowercaseSearchString = searchString.toLowerCase();
-  const {
-    funcTable,
-    frameTable,
-    stackTable,
-    stringTable,
-    resourceTable,
-    sources,
-  } = thread;
 
   function computeFuncMatchesSearch(func: IndexIntoFuncTable) {
     const nameIndex = funcTable.name[func];
@@ -1564,13 +1802,7 @@ export function filterThreadToSearchString(
     }
   }
 
-  // Set any stacks which don't include the search string to null.
-  // TODO: This includes stacks in markers; maybe we shouldn't clear marker stacks?
-  return updateThreadStacks(thread, stackTable, (stackIndex) =>
-    stackIndex !== null && checkBit(stackMatchesSearch, stackIndex)
-      ? stackIndex
-      : null
-  );
+  return stackMatchesSearch;
 }
 
 export function computeTimeColumnForRawSamplesTable(
@@ -1586,11 +1818,9 @@ export function computeTimeColumnForRawSamplesTable(
  */
 export function hasUsefulSamples(
   sampleStacks: Array<IndexIntoStackTable | null> | undefined,
-  thread: RawThread,
   shared: RawProfileSharedData
 ): boolean {
-  const { stringArray } = shared;
-  const { stackTable, frameTable, funcTable } = thread;
+  const { stackTable, frameTable, funcTable, stringArray } = shared;
   if (
     sampleStacks === undefined ||
     sampleStacks.length === 0 ||
@@ -1732,6 +1962,13 @@ export function filterThreadSamplesToRange(
     );
   }
 
+  if (samples.argumentValues) {
+    newSamples.argumentValues = samples.argumentValues.slice(
+      beginSampleIndex,
+      endSampleIndex
+    );
+  }
+
   if (samples.threadId) {
     newSamples.threadId = samples.threadId.slice(
       beginSampleIndex,
@@ -1858,6 +2095,13 @@ export function filterRawThreadSamplesToRange(
     );
   }
 
+  if (samples.argumentValues) {
+    newSamples.argumentValues = samples.argumentValues.slice(
+      beginSampleIndex,
+      endSampleIndex
+    );
+  }
+
   if (samples.threadId) {
     newSamples.threadId = samples.threadId.slice(
       beginSampleIndex,
@@ -1963,6 +2207,9 @@ export function filterCounterSamplesToRange(
     count: samples.count.slice(beginSampleIndex, endSampleIndex),
     number: samples.number
       ? samples.number.slice(beginSampleIndex, endSampleIndex)
+      : undefined,
+    argumentValues: samples.argumentValues
+      ? samples.argumentValues.slice(beginSampleIndex, endSampleIndex)
       : undefined,
   };
 
@@ -2288,6 +2535,7 @@ export function computeSamplesTableFromRawSamplesTable(
   const {
     responsiveness,
     eventDelay,
+    argumentValues,
     stack,
     weight,
     weightType,
@@ -2309,6 +2557,7 @@ export function computeSamplesTableFromRawSamplesTable(
     // These fields are copied from the raw samples table:
     responsiveness,
     eventDelay,
+    argumentValues,
     stack,
     weight,
     weightType,
@@ -2328,8 +2577,13 @@ export function createThreadFromDerivedTables(
   rawThread: RawThread,
   samples: SamplesTable,
   stackTable: StackTable,
+  frameTable: FrameTable,
+  funcTable: FuncTable,
+  nativeSymbols: NativeSymbolTable,
+  resourceTable: ResourceTable,
   stringTable: StringTable,
-  sources: SourceTable
+  sources: SourceTable,
+  tracedValuesBuffer: ArrayBuffer | undefined
 ): Thread {
   const {
     processType,
@@ -2349,13 +2603,10 @@ export function createThreadFromDerivedTables(
     jsAllocations,
     nativeAllocations,
     markers,
-    frameTable,
-    funcTable,
-    resourceTable,
-    nativeSymbols,
     jsTracer,
     isPrivateBrowsing,
     userContextId,
+    tracedObjectShapes,
   } = rawThread;
 
   const thread: Thread = {
@@ -2377,19 +2628,21 @@ export function createThreadFromDerivedTables(
     jsAllocations,
     nativeAllocations,
     markers,
-    frameTable,
-    funcTable,
-    resourceTable,
-    nativeSymbols,
     jsTracer,
     isPrivateBrowsing,
     userContextId,
+    tracedObjectShapes,
 
     // These fields are derived:
     samples,
     stackTable,
+    frameTable,
+    funcTable,
+    resourceTable,
+    nativeSymbols,
     stringTable,
     sources,
+    tracedValuesBuffer,
   };
   return thread;
 }
@@ -2504,23 +2757,17 @@ export function updateThreadStacks(
 }
 
 /**
- * Updates the stackTable and all references to stacks in the raw thread.
+ * Updates all references to stacks in the raw threads.
  *
  * This function is used by symbolication, which acts on the raw thread.
  */
 export function updateRawThreadStacks(
-  thread: RawThread,
-  newStackTable: RawStackTable,
+  threads: RawThread[],
   convertStack: (
     oldStack: IndexIntoStackTable | null
   ) => IndexIntoStackTable | null
-): RawThread {
-  return updateRawThreadStacksSeparate(
-    thread,
-    newStackTable,
-    convertStack,
-    convertStack
-  );
+): RawThread[] {
+  return updateRawThreadStacksSeparate(threads, convertStack, convertStack);
 }
 
 /**
@@ -2535,8 +2782,25 @@ export function updateRawThreadStacks(
  * which act on the raw thread.
  */
 export function updateRawThreadStacksSeparate(
+  threads: RawThread[],
+  convertStack: (
+    oldStack: IndexIntoStackTable | null
+  ) => IndexIntoStackTable | null,
+  convertSyncBacktraceStack: (
+    oldStack: IndexIntoStackTable | null
+  ) => IndexIntoStackTable | null
+): RawThread[] {
+  return threads.map((thread) =>
+    updateSingleRawThreadStacksSeparate(
+      thread,
+      convertStack,
+      convertSyncBacktraceStack
+    )
+  );
+}
+
+export function updateSingleRawThreadStacksSeparate(
   thread: RawThread,
-  newStackTable: RawStackTable,
   convertStack: (
     oldStack: IndexIntoStackTable | null
   ) => IndexIntoStackTable | null,
@@ -2576,7 +2840,6 @@ export function updateRawThreadStacksSeparate(
     ...thread,
     samples: newSamples,
     markers: newMarkers,
-    stackTable: newStackTable,
   };
 
   if (jsAllocations) {
@@ -2916,10 +3179,11 @@ export function getOriginAnnotationForFunc(
  * At the moment, the only functions we reserve are "collapsed resource" functions.
  * These are used by the "collapse resource" transform.
  */
-export function reserveFunctionsInThread(
-  thread: Thread
-): ThreadWithReservedFunctions {
-  const funcTable = shallowCloneFuncTable(thread.funcTable);
+export function reserveFunctionsForCollapsedResources(
+  originalFuncTable: FuncTable,
+  resourceTable: ResourceTable
+): FuncTableWithReservedFunctions {
+  const funcTable = shallowCloneFuncTable(originalFuncTable);
   const reservedFunctionsForResources = new Map<
     IndexIntoResourceTable,
     IndexIntoFuncTable
@@ -2930,7 +3194,6 @@ export function reserveFunctionsInThread(
     resourceTypes.webhost,
     resourceTypes.otherhost,
   ];
-  const { resourceTable } = thread;
   for (
     let resourceIndex = 0;
     resourceIndex < resourceTable.length;
@@ -2951,7 +3214,7 @@ export function reserveFunctionsInThread(
     reservedFunctionsForResources.set(resourceIndex, funcIndex);
   }
   return {
-    thread: { ...thread, funcTable },
+    funcTable,
     reservedFunctionsForResources,
   };
 }
@@ -3307,7 +3570,7 @@ export function extractProfileFilterPageData(
       pageDataByTabID.set(tabID, {
         origin: pageUrl,
         hostname: pageUrl,
-        favicon: DefaultLinkFavicon,
+        favicon: null,
       });
       continue;
     }
@@ -3321,12 +3584,11 @@ export function extractProfileFilterPageData(
     // moz-extension:// protocol on platforms outside of Firefox. Only Firefox
     // can parse it properly. Chrome and node will output a URL with no `origin`.
     const isExtension = pageUrl.startsWith('moz-extension://');
-    const defaultFavicon = isExtension ? ExtensionFavicon : DefaultLinkFavicon;
     const pageData: ProfileFilterPageData = {
       // These will be used as a fallback if the urls have been sanitized.
       origin: pageUrl,
       hostname: pageUrl,
-      favicon: currentPage.favicon ?? defaultFavicon,
+      favicon: currentPage.favicon ?? null,
     };
 
     try {
@@ -3360,59 +3622,6 @@ export function extractProfileFilterPageData(
   return pageDataByTabID;
 }
 
-// Returns the resource index for a "url" or "webhost" resource which is created
-// on demand based on the script URI.
-export function getOrCreateURIResource(
-  scriptURI: string,
-  resourceTable: ResourceTable,
-  stringTable: StringTable,
-  originToResourceIndex: Map<string, IndexIntoResourceTable>
-): IndexIntoResourceTable {
-  // Figure out the origin and host.
-  let origin;
-  let host;
-  try {
-    const url = new URL(scriptURI);
-    if (
-      !(
-        url.protocol === 'http:' ||
-        url.protocol === 'https:' ||
-        url.protocol === 'moz-extension:'
-      )
-    ) {
-      throw new Error('not a webhost or extension protocol');
-    }
-    origin = url.origin;
-    host = url.host;
-  } catch (_e) {
-    origin = scriptURI;
-    host = null;
-  }
-
-  let resourceIndex = originToResourceIndex.get(origin);
-  if (resourceIndex !== undefined) {
-    return resourceIndex;
-  }
-
-  resourceIndex = resourceTable.length++;
-  originToResourceIndex.set(origin, resourceIndex);
-  if (host) {
-    // This is a webhost URL.
-    resourceTable.lib[resourceIndex] = null;
-    resourceTable.name[resourceIndex] = stringTable.indexForString(origin);
-    resourceTable.host[resourceIndex] = stringTable.indexForString(host);
-    resourceTable.type[resourceIndex] = resourceTypes.webhost;
-  } else {
-    // This is a URL, but it doesn't point to something on the web, e.g. a
-    // chrome url.
-    resourceTable.lib[resourceIndex] = null;
-    resourceTable.name[resourceIndex] = stringTable.indexForString(scriptURI);
-    resourceTable.host[resourceIndex] = null;
-    resourceTable.type[resourceIndex] = resourceTypes.url;
-  }
-  return resourceIndex;
-}
-
 /**
  * See the ThreadsKey type for an explanation.
  */
@@ -3424,6 +3633,30 @@ export function getThreadsKey(threadIndexes: Set<ThreadIndex>): ThreadsKey {
   }
 
   return [...threadIndexes].sort((a, b) => b - a).join(',');
+}
+
+/**
+ * Apply a Map<ThreadIndex, ThreadIndex> to a threads key.
+ *
+ * This is used after profile sanitization when a thread was removed from a profile,
+ * to update state such as the applied transforms of each threadsKey.
+ */
+export function translateThreadsKey(
+  threadsKey: ThreadsKey,
+  oldThreadIndexToNew: Map<ThreadIndex, ThreadIndex>
+): ThreadsKey | null {
+  const threadIndexes = new Set(('' + threadsKey).split(',').map((n) => +n));
+  const newThreadIndexes = new Set<ThreadIndex>();
+  for (const threadIndex of threadIndexes) {
+    const newThreadIndex = oldThreadIndexToNew.get(threadIndex);
+    if (newThreadIndex !== undefined) {
+      newThreadIndexes.add(newThreadIndex);
+    }
+  }
+  if (newThreadIndexes.size === 0) {
+    return null;
+  }
+  return getThreadsKey(newThreadIndexes);
 }
 
 /**
@@ -3465,10 +3698,25 @@ export type StackReferences = {
  * samples, and stacks referenced by sync backtraces (e.g. marker causes).
  * The two have slightly different properties, see the type definition.
  */
-export function gatherStackReferences(thread: RawThread): StackReferences {
+export function gatherStackReferences(threads: RawThread[]): StackReferences {
   const samplingSelfStacks: Set<IndexIntoStackTable> = new Set();
   const syncBacktraceSelfStacks: Set<IndexIntoStackTable> = new Set();
+  for (const thread of threads) {
+    _gatherSingleThreadStackReferences(
+      thread,
+      samplingSelfStacks,
+      syncBacktraceSelfStacks
+    );
+  }
 
+  return { samplingSelfStacks, syncBacktraceSelfStacks };
+}
+
+export function _gatherSingleThreadStackReferences(
+  thread: RawThread,
+  samplingSelfStacks: Set<IndexIntoStackTable>,
+  syncBacktraceSelfStacks: Set<IndexIntoStackTable>
+) {
   const { samples, markers, jsAllocations, nativeAllocations } = thread;
 
   // Samples
@@ -3509,8 +3757,6 @@ export function gatherStackReferences(thread: RawThread): StackReferences {
       }
     }
   }
-
-  return { samplingSelfStacks, syncBacktraceSelfStacks };
 }
 
 /**
@@ -3636,11 +3882,12 @@ export function gatherStackReferences(thread: RawThread): StackReferences {
  *     used in both contexts. If we detect that this happened, we need to duplicate
  *     the frame and the stack node and pick the right one depending on the use.
  */
-export function nudgeReturnAddresses(thread: RawThread): RawThread {
-  const { samplingSelfStacks, syncBacktraceSelfStacks } =
-    gatherStackReferences(thread);
+export function nudgeReturnAddresses(profile: Profile): Profile {
+  const { samplingSelfStacks, syncBacktraceSelfStacks } = gatherStackReferences(
+    profile.threads
+  );
 
-  const { stackTable, frameTable } = thread;
+  const { stackTable, frameTable } = profile.shared;
 
   // Collect frames that were obtained from the instruction pointer.
   // These are the top ("self") frames of stacks from sampling.
@@ -3683,7 +3930,7 @@ export function nudgeReturnAddresses(thread: RawThread): RawThread {
 
   if (ipFrames.size === 0 && returnAddressFrames.size === 0) {
     // Nothing to do, use the original thread.
-    return thread;
+    return profile;
   }
 
   // Create the new frame table.
@@ -3769,17 +4016,25 @@ export function nudgeReturnAddresses(thread: RawThread): RawThread {
     }
   }
 
-  const newThread: RawThread = {
-    ...thread,
+  const newShared: RawProfileSharedData = {
+    ...profile.shared,
     frameTable: newFrameTable,
+    stackTable: newStackTable,
   };
 
-  return updateRawThreadStacksSeparate(
-    newThread,
-    newStackTable,
+  const newThreads = updateRawThreadStacksSeparate(
+    profile.threads,
     getMapStackUpdater(mapForSamplingSelfStacks),
     getMapStackUpdater(mapForBacktraceSelfStacks)
   );
+
+  const newProfile: Profile = {
+    ...profile,
+    shared: newShared,
+    threads: newThreads,
+  };
+
+  return newProfile;
 }
 
 /**
@@ -3791,37 +4046,34 @@ export function findAddressProofForFile(
   sourceIndex: IndexIntoSourceTable
 ): AddressProof | null {
   const { libs } = profile;
-  for (const thread of profile.threads) {
-    const { frameTable, funcTable, resourceTable } = thread;
-    const func = funcTable.source.indexOf(sourceIndex);
-    if (func === -1) {
-      continue;
-    }
-    const frame = frameTable.func.indexOf(func);
-    if (frame === -1) {
-      continue;
-    }
-    const address = frameTable.address[frame];
-    if (address === null) {
-      continue;
-    }
-    const resource = funcTable.resource[func];
-    if (resourceTable.type[resource] !== resourceTypes.library) {
-      continue;
-    }
-    const libIndex = resourceTable.lib[resource];
-    if (libIndex === null) {
-      continue;
-    }
-    const lib = libs[libIndex];
-    const { debugName, breakpadId } = lib;
-    return {
-      debugName,
-      breakpadId,
-      address,
-    };
+  const { frameTable, funcTable, resourceTable } = profile.shared;
+  const func = funcTable.source.indexOf(sourceIndex);
+  if (func === -1) {
+    return null;
   }
-  return null;
+  const frame = frameTable.func.indexOf(func);
+  if (frame === -1) {
+    return null;
+  }
+  const address = frameTable.address[frame];
+  if (address === null) {
+    return null;
+  }
+  const resource = funcTable.resource[func];
+  if (resourceTable.type[resource] !== resourceTypes.library) {
+    return null;
+  }
+  const libIndex = resourceTable.lib[resource];
+  if (libIndex === null) {
+    return null;
+  }
+  const lib = libs[libIndex];
+  const { debugName, breakpadId } = lib;
+  return {
+    debugName,
+    breakpadId,
+    address,
+  };
 }
 
 /**
@@ -3858,81 +4110,64 @@ export function calculateFunctionSizeLowerBound(
  * functions.
  */
 export function getNativeSymbolsForCallNode(
-  callNodeIndex: IndexIntoCallNodeTable,
-  callNodeInfo: CallNodeInfo,
-  stackTable: StackTable,
+  callNodeFramePerStack: Int32Array,
   frameTable: FrameTable
-): IndexIntoNativeSymbolTable[] {
-  const callNodeInfoInverted = callNodeInfo.asInverted();
-  return callNodeInfoInverted !== null
-    ? getNativeSymbolsForCallNodeInverted(
-        callNodeIndex,
-        callNodeInfoInverted,
-        stackTable,
-        frameTable
-      )
-    : getNativeSymbolsForCallNodeNonInverted(
-        callNodeIndex,
-        callNodeInfo,
-        stackTable,
-        frameTable
-      );
-}
-
-export function getNativeSymbolsForCallNodeNonInverted(
-  callNodeIndex: IndexIntoCallNodeTable,
-  callNodeInfo: CallNodeInfo,
-  stackTable: StackTable,
-  frameTable: FrameTable
-): IndexIntoNativeSymbolTable[] {
-  const stackIndexToCallNodeIndex =
-    callNodeInfo.getStackIndexToNonInvertedCallNodeIndex();
-  const set: Set<IndexIntoNativeSymbolTable> = new Set();
-  for (let stackIndex = 0; stackIndex < stackTable.length; stackIndex++) {
-    if (stackIndexToCallNodeIndex[stackIndex] === callNodeIndex) {
-      const frame = stackTable.frame[stackIndex];
-      const nativeSymbol = frameTable.nativeSymbol[frame];
+): Set<IndexIntoNativeSymbolTable> {
+  const set = new Set<IndexIntoNativeSymbolTable>();
+  for (
+    let stackIndex = 0;
+    stackIndex < callNodeFramePerStack.length;
+    stackIndex++
+  ) {
+    const callNodeFrame = callNodeFramePerStack[stackIndex];
+    if (callNodeFrame !== -1) {
+      const nativeSymbol = frameTable.nativeSymbol[callNodeFrame];
       if (nativeSymbol !== null) {
         set.add(nativeSymbol);
       }
     }
   }
-  return [...set];
+  return set;
 }
 
-export function getNativeSymbolsForCallNodeInverted(
-  callNodeIndex: IndexIntoCallNodeTable,
-  callNodeInfo: CallNodeInfoInverted,
-  stackTable: StackTable,
+/**
+ * Return the total of the sample weights per native symbol, by
+ * accumulating the weight from samples which contribute to the
+ * call node of interest's total time.
+ * callNodeFramePerStack needs to be a mapping from stackIndex to the
+ * corresponding frame in the call node of interest.
+ */
+export function getTotalNativeSymbolTimingsForCallNode(
+  samples: SamplesLikeTable,
+  callNodeFramePerStack: Int32Array,
   frameTable: FrameTable
-): IndexIntoNativeSymbolTable[] {
-  const depth = callNodeInfo.depthForNode(callNodeIndex);
-  const [rangeStart, rangeEnd] =
-    callNodeInfo.getSuffixOrderIndexRangeForCallNode(callNodeIndex);
-  const stackTablePrefixCol = stackTable.prefix;
-  const stackIndexToCallNodeIndex =
-    callNodeInfo.getStackIndexToNonInvertedCallNodeIndex();
-  const suffixOrderIndexes = callNodeInfo.getSuffixOrderIndexes();
-  const set: Set<IndexIntoNativeSymbolTable> = new Set();
-  for (let stackIndex = 0; stackIndex < stackTable.length; stackIndex++) {
-    const stackForNode = getMatchingAncestorStackForInvertedCallNode(
-      stackIndex,
-      rangeStart,
-      rangeEnd,
-      suffixOrderIndexes,
-      depth,
-      stackIndexToCallNodeIndex,
-      stackTablePrefixCol
+): Map<IndexIntoNativeSymbolTable, number> {
+  const totalPerNativeSymbol = new Map<IndexIntoNativeSymbolTable, number>();
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex++) {
+    const stack = samples.stack[sampleIndex];
+    if (stack === null) {
+      continue;
+    }
+    const callNodeFrame = callNodeFramePerStack[stack];
+    if (callNodeFrame === -1) {
+      // This sample does not contribute to the call node's total. Ignore.
+      continue;
+    }
+
+    const nativeSymbol = frameTable.nativeSymbol[callNodeFrame];
+    if (nativeSymbol === null) {
+      continue;
+    }
+
+    const sampleWeight =
+      samples.weight !== null ? samples.weight[sampleIndex] : 1;
+    totalPerNativeSymbol.set(
+      nativeSymbol,
+      (totalPerNativeSymbol.get(nativeSymbol) ?? 0) + sampleWeight
     );
-    if (stackForNode !== null) {
-      const frame = stackTable.frame[stackForNode];
-      const nativeSymbol = frameTable.nativeSymbol[frame];
-      if (nativeSymbol !== null) {
-        set.add(nativeSymbol);
-      }
-    }
   }
-  return [...set];
+
+  return totalPerNativeSymbol;
 }
 
 /**
@@ -3959,109 +4194,6 @@ export function getNativeSymbolInfo(
     name: stringTable.getString(nativeSymbols.name[nativeSymbol]),
     functionSize,
     functionSizeIsKnown: functionSizeOrNull !== null,
-  };
-}
-
-/**
- * Calculate the BottomBoxInfo for a call node, i.e. information about which
- * things should be shown in the profiler UI's "bottom box" when this call node
- * is double-clicked.
- *
- * We always want to update all panes in the bottom box when a new call node is
- * double-clicked, so that we don't show inconsistent information side-by-side.
- */
-export function getBottomBoxInfoForCallNode(
-  callNodeIndex: IndexIntoCallNodeTable,
-  callNodeInfo: CallNodeInfo,
-  thread: Thread
-): BottomBoxInfo {
-  const {
-    stackTable,
-    frameTable,
-    funcTable,
-    stringTable,
-    resourceTable,
-    nativeSymbols,
-  } = thread;
-
-  const funcIndex = callNodeInfo.funcForNode(callNodeIndex);
-  const sourceIndex = funcTable.source[funcIndex];
-  const resource = funcTable.resource[funcIndex];
-  const libIndex =
-    resource !== -1 && resourceTable.type[resource] === resourceTypes.library
-      ? resourceTable.lib[resource]
-      : null;
-  const nativeSymbolsForCallNode = getNativeSymbolsForCallNode(
-    callNodeIndex,
-    callNodeInfo,
-    stackTable,
-    frameTable
-  );
-  const nativeSymbolInfosForCallNode = nativeSymbolsForCallNode.map(
-    (nativeSymbolIndex) =>
-      getNativeSymbolInfo(
-        nativeSymbolIndex,
-        nativeSymbols,
-        frameTable,
-        stringTable
-      )
-  );
-
-  return {
-    libIndex,
-    sourceIndex,
-    nativeSymbols: nativeSymbolInfosForCallNode,
-  };
-}
-
-/**
- * Get bottom box info for a stack frame. This is similar to
- * getBottomBoxInfoForCallNode but works directly with stack indexes.
- */
-export function getBottomBoxInfoForStackFrame(
-  stackIndex: IndexIntoStackTable,
-  thread: Thread
-): BottomBoxInfo {
-  const {
-    stackTable,
-    frameTable,
-    funcTable,
-    resourceTable,
-    nativeSymbols,
-    stringTable,
-  } = thread;
-
-  const frameIndex = stackTable.frame[stackIndex];
-  const funcIndex = frameTable.func[frameIndex];
-  const sourceIndex = funcTable.source[funcIndex];
-  const resource = funcTable.resource[funcIndex];
-  const libIndex =
-    resource !== -1 && resourceTable.type[resource] === resourceTypes.library
-      ? resourceTable.lib[resource]
-      : null;
-
-  // Get native symbol for this frame
-  const nativeSymbol = frameTable.nativeSymbol[frameIndex];
-  const nativeSymbolInfos =
-    nativeSymbol !== null
-      ? [
-          getNativeSymbolInfo(
-            nativeSymbol,
-            nativeSymbols,
-            frameTable,
-            stringTable
-          ),
-        ]
-      : [];
-
-  // Extract line number from the frame
-  const lineNumber = frameTable.line[frameIndex] ?? undefined;
-
-  return {
-    libIndex,
-    sourceIndex,
-    nativeSymbols: nativeSymbolInfos,
-    lineNumber,
   };
 }
 
@@ -4109,17 +4241,19 @@ export function computeTabToThreadIndexesMap(
     return tabToThreadIndexesMap;
   }
 
-  // We need to iterate over all the samples and markers once to figure out
-  // which innerWindowIDs are present in each thread. This is probably not
-  // very cheap, but it'll allow us to not compute this information every
-  // time when we need it.
+  // Iterate over the usedInnerWindowIDs for each thread to figure out
+  // which threads are involved for each tab.
   for (let threadIdx = 0; threadIdx < threads.length; threadIdx++) {
     const thread = threads[threadIdx];
+    const { usedInnerWindowIDs } = thread;
 
-    // First go over the innerWindowIDs of the samples.
-    for (let i = 0; i < thread.frameTable.length; i++) {
-      const innerWindowID = thread.frameTable.innerWindowID[i];
-      if (innerWindowID === null || innerWindowID === 0) {
+    if (!usedInnerWindowIDs) {
+      // No innerWindowIDs for this thread
+      continue;
+    }
+
+    for (const innerWindowID of usedInnerWindowIDs) {
+      if (innerWindowID === 0) {
         // Zero value also means null for innerWindowID.
         continue;
       }
@@ -4137,38 +4271,6 @@ export function computeTabToThreadIndexesMap(
         tabToThreadIndexesMap.set(tabID, threadIndexes);
       }
       threadIndexes.add(threadIdx);
-    }
-
-    // Then go over the markers to find their innerWindowIDs.
-    for (let i = 0; i < thread.markers.length; i++) {
-      const markerData = thread.markers.data[i];
-
-      if (!markerData) {
-        continue;
-      }
-
-      if (
-        'innerWindowID' in markerData &&
-        markerData.innerWindowID !== null &&
-        markerData.innerWindowID !== undefined &&
-        // Zero value also means null for innerWindowID.
-        markerData.innerWindowID !== 0
-      ) {
-        const innerWindowID = markerData.innerWindowID;
-        const tabID = innerWindowIDToTabMap.get(innerWindowID);
-        if (tabID === undefined) {
-          // We couldn't find the tab of this innerWindowID, this should
-          // never happen, it might indicate a bug in Firefox.
-          continue;
-        }
-
-        let threadIndexes = tabToThreadIndexesMap.get(tabID);
-        if (!threadIndexes) {
-          threadIndexes = new Set();
-          tabToThreadIndexesMap.set(tabID, threadIndexes);
-        }
-        threadIndexes.add(threadIdx);
-      }
     }
   }
 

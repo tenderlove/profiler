@@ -15,6 +15,7 @@ import {
   createGeckoCounter,
   createGeckoMarkerStack,
   createGeckoProfilerOverhead,
+  getEmptySourceTable,
   getVisualMetrics,
 } from '../fixtures/profiles/gecko-profile';
 import { ensureExists } from '../../utils/types';
@@ -103,21 +104,20 @@ describe('extract functions and resource from location strings', function () {
     length: 2,
   };
   const globalDataCollector = new GlobalDataCollector();
+  globalDataCollector.addExtensionOrigins(extensions);
 
   it('extracts the information for all different types of locations', function () {
-    const { funcTable, resourceTable, frameFuncs } =
-      extractFuncsAndResourcesFromFrameLocations(
-        locationIndexes,
-        locationIndexes.map(() => false),
-        geckoThreadStringArray,
-        libs,
-        extensions,
-        globalDataCollector,
-        undefined
-      );
+    const { frameFuncs } = extractFuncsAndResourcesFromFrameLocations(
+      locationIndexes,
+      locationIndexes.map(() => false),
+      geckoThreadStringArray,
+      libs,
+      globalDataCollector,
+      getEmptySourceTable()
+    );
 
     const {
-      shared: { sources },
+      shared: { sources, funcTable, resourceTable },
     } = globalDataCollector.finish();
     const stringTable = globalDataCollector.getStringTable();
 
@@ -435,14 +435,14 @@ describe('js allocation processing', function () {
     };
   }
   function getFrameAddressesForStack(
-    thread: RawThread,
+    shared: RawProfileSharedData,
     stackIndex: IndexIntoStackTable | null
   ) {
     const addresses = [];
     let stack = stackIndex;
     while (stack !== null) {
-      addresses.push(thread.frameTable.address[thread.stackTable.frame[stack]]);
-      stack = thread.stackTable.prefix[stack];
+      addresses.push(shared.frameTable.address[shared.stackTable.frame[stack]]);
+      stack = shared.stackTable.prefix[stack];
     }
     addresses.reverse();
     return addresses;
@@ -486,13 +486,13 @@ describe('js allocation processing', function () {
     // All addressses should be nudged by 1 byte, because js allocation stack frames
     // all come from stack walking (the instruction pointer frame is removed by gecko).
     expect(
-      getFrameAddressesForStack(processedThread, jsAllocations.stack[0])
+      getFrameAddressesForStack(processedProfile.shared, jsAllocations.stack[0])
     ).toEqual([-1, 0xf83, 0x1a44, 0x1bcc]);
     expect(
-      getFrameAddressesForStack(processedThread, jsAllocations.stack[1])
+      getFrameAddressesForStack(processedProfile.shared, jsAllocations.stack[1])
     ).toEqual([-1, 0xf83, 0x1a44, 0x1bcd]);
     expect(
-      getFrameAddressesForStack(processedThread, jsAllocations.stack[2])
+      getFrameAddressesForStack(processedProfile.shared, jsAllocations.stack[2])
     ).toEqual([]);
   });
 });
@@ -932,41 +932,37 @@ describe('source table processing', function () {
     const geckoProfile = createGeckoProfile();
     const processedProfile = processGeckoProfile(geckoProfile);
 
-    // Check that all threads have correct funcTable.source values
+    // Check that the funcTable has correct source values
     expect(processedProfile.threads.length).toBeGreaterThan(0);
-    for (const thread of processedProfile.threads) {
-      expect(thread.funcTable.source).toBeArray();
+    expect(processedProfile.shared.funcTable.source).toBeArray();
 
-      // Should have at least some functions in the test profile
-      expect(thread.funcTable.length).toBeGreaterThan(0);
+    // Should have at least some functions in the test profile
+    expect(processedProfile.shared.funcTable.length).toBeGreaterThan(0);
 
-      // Verify that source indexes are valid
-      for (let i = 0; i < thread.funcTable.length; i++) {
-        const sourceIndex = thread.funcTable.source[i];
-        if (sourceIndex === null) {
-          // Skip the native functions that don't have sources yet. They are
-          // added during symbolication.
-          continue;
-        }
-
-        expect(sourceIndex).toBeGreaterThanOrEqual(0);
-        expect(sourceIndex).toBeLessThan(
-          processedProfile.shared.sources.length
-        );
-
-        // Verify that the source points to a valid filename
-        const filenameIndex =
-          processedProfile.shared.sources.filename[sourceIndex];
-        expect(filenameIndex).toBeGreaterThanOrEqual(0);
-        expect(filenameIndex).toBeLessThan(
-          processedProfile.shared.stringArray.length
-        );
-
-        // Verify the filename string is not empty
-        const filename = processedProfile.shared.stringArray[filenameIndex];
-        expect(filename).toBeString();
-        expect(filename.length).toBeGreaterThan(0);
+    // Verify that source indexes are valid
+    for (let i = 0; i < processedProfile.shared.funcTable.length; i++) {
+      const sourceIndex = processedProfile.shared.funcTable.source[i];
+      if (sourceIndex === null) {
+        // Skip the native functions that don't have sources yet. They are
+        // added during symbolication.
+        continue;
       }
+
+      expect(sourceIndex).toBeGreaterThanOrEqual(0);
+      expect(sourceIndex).toBeLessThan(processedProfile.shared.sources.length);
+
+      // Verify that the source points to a valid filename
+      const filenameIndex =
+        processedProfile.shared.sources.filename[sourceIndex];
+      expect(filenameIndex).toBeGreaterThanOrEqual(0);
+      expect(filenameIndex).toBeLessThan(
+        processedProfile.shared.stringArray.length
+      );
+
+      // Verify the filename string is not empty
+      const filename = processedProfile.shared.stringArray[filenameIndex];
+      expect(filename).toBeString();
+      expect(filename.length).toBeGreaterThan(0);
     }
   });
 
@@ -1004,5 +1000,87 @@ describe('source table processing', function () {
 
     // The test profile should have at least one source
     expect(sources.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Marker schema conversion', function () {
+  it('should preserve optional marker schema properties', function () {
+    const geckoProfile = createGeckoProfile();
+
+    // Add marker schemas with various optional properties
+    geckoProfile.meta.markerSchema.push(
+      {
+        name: 'TestMarkerMinimal',
+        display: ['marker-chart'],
+        data: [{ key: 'name', label: 'Name', format: 'string' }],
+      },
+      {
+        name: 'TestMarkerWithLabels',
+        tooltipLabel: 'Custom Tooltip',
+        tableLabel: '{marker.data.status}',
+        chartLabel: 'Chart: {marker.data.name}',
+        display: ['marker-chart', 'marker-table'],
+        data: [
+          { key: 'name', label: 'Name', format: 'string' },
+          { key: 'status', label: 'Status', format: 'string' },
+        ],
+      },
+      {
+        name: 'TestMarkerWithGraphs',
+        display: ['marker-chart'],
+        data: [{ key: 'value', label: 'Value', format: 'integer' }],
+        graphs: [{ key: 'value', type: 'line', color: 'blue' }],
+        isStackBased: false,
+      },
+      {
+        name: 'TestMarkerWithColor',
+        display: ['marker-chart', 'marker-table'],
+        data: [
+          { key: 'status', label: 'Status', format: 'string' },
+          { key: 'color', label: 'Color', format: 'string' },
+        ],
+        colorField: 'color',
+      }
+    );
+
+    // Process the profile
+    const processedProfile = processGeckoProfile(geckoProfile);
+
+    // Test minimal schema works
+    const schemaMinimal = processedProfile.meta.markerSchema.find(
+      (s) => s.name === 'TestMarkerMinimal'
+    );
+    expect(schemaMinimal).toBeDefined();
+    expect(schemaMinimal?.tooltipLabel).toBeUndefined();
+    expect(schemaMinimal?.tableLabel).toBeUndefined();
+    expect(schemaMinimal?.chartLabel).toBeUndefined();
+    expect(schemaMinimal?.colorField).toBeUndefined();
+    expect(schemaMinimal?.graphs).toBeUndefined();
+    expect(schemaMinimal?.isStackBased).toBeUndefined();
+
+    // Test labels are preserved
+    const schemaWithLabels = processedProfile.meta.markerSchema.find(
+      (s) => s.name === 'TestMarkerWithLabels'
+    );
+    expect(schemaWithLabels).toBeDefined();
+    expect(schemaWithLabels?.tooltipLabel).toBe('Custom Tooltip');
+    expect(schemaWithLabels?.tableLabel).toBe('{marker.data.status}');
+    expect(schemaWithLabels?.chartLabel).toBe('Chart: {marker.data.name}');
+
+    // Test graphs and isStackBased are preserved
+    const schemaWithGraphs = processedProfile.meta.markerSchema.find(
+      (s) => s.name === 'TestMarkerWithGraphs'
+    );
+    expect(schemaWithGraphs).toBeDefined();
+    expect(schemaWithGraphs?.graphs).toHaveLength(1);
+    expect(schemaWithGraphs?.isStackBased).toBe(false);
+    expect(schemaWithGraphs?.colorField).toBeUndefined();
+
+    // Test colorField is preserved
+    const schemaWithColor = processedProfile.meta.markerSchema.find(
+      (s) => s.name === 'TestMarkerWithColor'
+    );
+    expect(schemaWithColor).toBeDefined();
+    expect(schemaWithColor?.colorField).toBe('color');
   });
 });

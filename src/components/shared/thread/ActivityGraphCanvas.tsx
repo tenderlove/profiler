@@ -83,7 +83,7 @@ export class ActivityGraphCanvas extends React.PureComponent<CanvasProps> {
             category: categoryIndex,
             filteredOutByTransformFillStyle: _createDiagonalStripePattern(
               ctx,
-              styles.unselectedFillStyle
+              styles.getUnselectedFillStyle()
             ),
           };
         }
@@ -105,7 +105,19 @@ export class ActivityGraphCanvas extends React.PureComponent<CanvasProps> {
 
   override componentDidMount() {
     this._renderCanvas();
+    window.addEventListener('profiler-theme-change', this._onThemeChange);
   }
+
+  override componentWillUnmount() {
+    window.removeEventListener('profiler-theme-change', this._onThemeChange);
+  }
+
+  _onThemeChange = () => {
+    // Invalidate the cached category draw styles,
+    // so they are recreated with the new theme colors.
+    this._categoryDrawStyles = null;
+    this._renderCanvas();
+  };
 
   override componentDidUpdate() {
     this._renderCanvas();
@@ -163,6 +175,12 @@ export class ActivityGraphCanvas extends React.PureComponent<CanvasProps> {
     // previous fill.
     let previousUpperEdge = new Float32Array(canvasPixelWidth);
     for (const { fillStyle, accumulatedUpperEdge } of fills) {
+      if (fillStyle === 'transparent') {
+        // Skip any drawing work for the Idle category.
+        previousUpperEdge = accumulatedUpperEdge;
+        continue;
+      }
+
       ctx.fillStyle = fillStyle;
 
       // Some fills might not span the full width of the graph - they have parts where
@@ -230,7 +248,11 @@ export class ActivityGraphCanvas extends React.PureComponent<CanvasProps> {
 function _createDiagonalStripePattern(
   chartCtx: CanvasRenderingContext2D,
   color: string
-): CanvasPattern {
+): CanvasPattern | string {
+  if (color === 'transparent') {
+    return 'transparent';
+  }
+
   // Create a second canvas, draw to it in order to create a pattern. This canvas
   // and context will be discarded after the pattern is created.
   const patternCanvas = document.createElement('canvas');

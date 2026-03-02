@@ -22,6 +22,7 @@ import {
 } from 'firefox-profiler/profile-logic/profile-data';
 import { getProfileWithDicts } from './profiles/processed-profile';
 import { StringTable } from '../../utils/string-table';
+import { base64StringToBytes } from '../../utils/base64';
 
 import type {
   IndexIntoCallNodeTable,
@@ -144,8 +145,8 @@ export function computeThreadFromRawThread(
 ): Thread {
   const stringTable = StringTable.withBackingArray(shared.stringArray);
   const stackTable = computeStackTableFromRawStackTable(
-    rawThread.stackTable,
-    rawThread.frameTable,
+    shared.stackTable,
+    shared.frameTable,
     defaultCategory
   );
   const samples = computeSamplesTableFromRawSamplesTable(
@@ -153,12 +154,20 @@ export function computeThreadFromRawThread(
     sampleUnits,
     referenceCPUDeltaPerMs
   );
+  const tracedValuesBuffer = rawThread.tracedValuesBuffer
+    ? base64StringToBytes(rawThread.tracedValuesBuffer)
+    : undefined;
   return createThreadFromDerivedTables(
     rawThread,
     samples,
     stackTable,
+    shared.frameTable,
+    shared.funcTable,
+    shared.nativeSymbols,
+    shared.resourceTable,
     stringTable,
-    shared.sources
+    shared.sources,
+    tracedValuesBuffer
   );
 }
 
@@ -195,6 +204,7 @@ export function callTreeFromProfile(
     thread,
     callNodeInfo,
     ensureExists(profile.meta.categories),
+    thread.samples,
     callTreeTimings,
     'samples'
   );
@@ -243,6 +253,7 @@ export function functionListTreeFromProfile(
     thread,
     invertedCallNodeInfo,
     ensureExists(profile.meta.categories),
+    thread.samples,
     { type: 'FUNCTION_LIST', timings: functionListTimings },
     'samples'
   );
@@ -491,11 +502,18 @@ export function findFillTextPositionFromDrawLog(
  */
 export function fireFullClick(
   element: HTMLElement,
-  options?: FakeMouseEventInit
+  options?: FakeMouseEventInit,
+  dblClick?: boolean
 ) {
   fireEvent(element, getMouseEvent('mousedown', options));
   fireEvent(element, getMouseEvent('mouseup', options));
   fireEvent(element, getMouseEvent('click', options));
+  if (dblClick) {
+    fireEvent(element, getMouseEvent('mousedown', options));
+    fireEvent(element, getMouseEvent('mouseup', options));
+    fireEvent(element, getMouseEvent('click', options));
+    fireEvent(element, getMouseEvent('dblclick', options));
+  }
 }
 
 /**

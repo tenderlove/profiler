@@ -6,6 +6,9 @@ module.exports = {
   testMatch: ['<rootDir>/src/**/*.test.{js,jsx,ts,tsx}'],
   moduleFileExtensions: ['js', 'jsx', 'ts', 'tsx'],
 
+  // Use custom resolver that respects the "browser" field in package.json
+  resolver: './jest-resolver.js',
+
   testEnvironment: './src/test/custom-environment',
   setupFilesAfterEnv: ['jest-extended/all', './src/test/setup.ts'],
 
@@ -15,10 +18,14 @@ module.exports = {
     '!src/types/libdef/**',
   ],
 
+  transform: {
+    '\\.([jt]sx?|mjs)$': 'babel-jest',
+  },
+
   // Transform ESM modules to CommonJS for Jest
   // These packages ship as pure ESM and need to be transformed by Babel
   transformIgnorePatterns: [
-    '/node_modules/(?!(query-string|decode-uri-component|iongraph-web|split-on-first|filter-obj|fetch-mock)/)',
+    '/node_modules/(?!(query-string|decode-uri-component|iongraph-web|split-on-first|filter-obj|fetch-mock|devtools-reps)/)',
   ],
 
   // Mock static assets (images, CSS, etc.)

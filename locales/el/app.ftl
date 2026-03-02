@@ -21,6 +21,16 @@ AppHeader--app-header = <header>{ -profiler-brand-name }</header> — <subheader
 AppHeader--github-icon =
     .title = Μετάβαση στο αποθετήριο Git μας (ανοίγει σε νέο παράθυρο)
 
+## ThemeToggle
+## They are used at the top right side of the home page to switch between themes.
+
+ThemeToggle--system =
+    .title = Χρήση προτίμησης συστήματος
+ThemeToggle--light =
+    .title = Χρήση ανοιχτόχρωμου θέματος
+ThemeToggle--dark =
+    .title = Χρήση σκουρόχρωμου θέματος
+
 ## AppViewRouter
 ## This is used for displaying errors when loading the application.
 
@@ -79,6 +89,21 @@ CallNodeContextMenu--transform-focus-function = Εστίαση στη συνάρ
     .title = { CallNodeContextMenu--transform-focus-function-title }
 CallNodeContextMenu--transform-focus-function-inverted = Εστίαση στη συνάρτηση (ανεστραμμένη)
     .title = { CallNodeContextMenu--transform-focus-function-title }
+
+## The translation for "self" in these strings should match the translation used
+## in CallTree--samples-self and CallTree--bytes-self. Alternatively it can be
+## translated as "self values" or "self time" (though "self time" is less desirable
+## because this menu item is also shown in "bytes" mode).
+
+CallNodeContextMenu--transform-focus-self-title =
+    Η εστίαση στο self είναι παρόμοια με την εστίαση σε μια συνάρτηση, αλλά διατηρεί μόνο τα δείγματα
+    που συμβάλλουν στον χρόνο self της συνάρτησης. Τα δείγματα στις καλούμενες συναρτήσεις
+    απορρίπτονται και το δέντρο κλήσεων επαναριζώνεται στην εστιασμένη συνάρτηση.
+CallNodeContextMenu--transform-focus-self = Εστίαση μόνο στο self
+    .title = { CallNodeContextMenu--transform-focus-self-title }
+
+##
+
 CallNodeContextMenu--transform-focus-subtree = Εστίαση στο υπόδεντρο μόνο
     .title =
         Η εστίαση σε υπόδεντρο θα αφαιρέσει κάθε δείγμα που δεν περιλαμβάνει αυτό το
@@ -134,19 +159,19 @@ CallTree--tracing-ms-total = Χρόνος εκτέλεσης (ms)
         παρατηρήθηκε αυτή η συνάρτηση σε στοίβα. Περιέχει τον χρόνο πραγματικής
         εκτέλεσης της συνάρτησης και τον χρόνο που χρησιμοποιήθηκε στους καλούντες από
         αυτήν τη συνάρτηση.
-CallTree--tracing-ms-self = Ιδιοχρόνος (ms)
+CallTree--tracing-ms-self = Self (ms)
     .title =
-        Ο ατομικός χρόνος περιλαμβάνει μόνο τον χρόνο που η συνάρτηση βρισκόταν
-        στο τέλος της στοίβας. Αν η συνάρτηση καλούταν σε άλλες συναρτήσεις,
-        τότε ο χρόνος των άλλων συναρτήσεων δεν περιλαμβάνεται. Ο ατομικός χρόνος είναι
+        Ο χρόνος «self» περιλαμβάνει μόνο τον χρόνο που η συνάρτηση βρισκόταν
+        στο τέλος της στοίβας. Αν η συνάρτηση κλήθηκε σε άλλες συναρτήσεις,
+        τότε ο χρόνος των άλλων συναρτήσεων δεν περιλαμβάνεται. Ο χρόνος «self» είναι
         χρήσιμος για να κατανοήσετε πώς ξοδεύτηκε ο χρόνος σε ένα πρόγραμμα.
 CallTree--samples-total = Σύνολο (δείγματα)
     .title = Το «σύνολο» δειγμάτων περιλαμβάνει μια σύνοψη όλων των δειγμάτων στα οποία παρατηρήθηκε ότι η συνάρτηση βρίσκεται στη στοίβα. Περιλαμβάνει τον χρόνο που εκτελούταν η συνάρτηση και τον χρόνο που ξοδεύτηκε στις κλήσεις από αυτήν τη συνάρτηση.
-CallTree--samples-self = Ιδιοαριθμός
+CallTree--samples-self = Self
     .title =
-        Ο ατομικός αριθμός δειγμάτων περιλαμβάνει μόνο τα δείγματα στα οποία η συνάρτηση
+        Το πλήθος δειγμάτων «self» περιλαμβάνει μόνο τα δείγματα στα οποία η συνάρτηση
         ήταν στο τέλος της στοίβας. Αν η συνάρτηση κλήθηκε σε άλλες συναρτήσεις,
-        τότε τα πλήθη των άλλων συναρτήσεων δεν συμπεριλαμβάνονται. Ο ατομικός αριθμός είναι χρήσιμος
+        τότε τα πλήθη των άλλων συναρτήσεων δεν συμπεριλαμβάνονται. Το πλήθος «self» είναι χρήσιμο
         για να κατανοήσετε πώς ξοδεύτηκε ο χρόνος σε ένα πρόγραμμα.
 CallTree--bytes-total = Συνολικό μέγεθος (bytes)
     .title =
@@ -154,12 +179,12 @@ CallTree--bytes-total = Συνολικό μέγεθος (bytes)
         αποδεσμεύτηκαν όσο παρατηρήθηκε ότι η συνάρτηση είναι στο τέλος της στοίβας.
         Περιλαμβάνει το μέγεθος σε bytes όπου εκτελούταν η συνάρτηση, καθώς και τα
         bytes των καλούντων από αυτήν τη συνάρτηση.
-CallTree--bytes-self = Ιδιο-bytes (bytes)
+CallTree--bytes-self = Self (bytes)
     .title =
-        Τα ατομικά bytes περιλαμβάνουν τα bytes που δεσμεύθηκαν ή αποδεσμεύθηκαν
+        Τα bytes του «self» περιλαμβάνουν τα bytes που δεσμεύθηκαν ή αποδεσμεύθηκαν
         όσο η συνάρτηση ήταν στο τέλος της στοίβας. Αν η συνάρτηση κλήθηκε σε άλλες
         συναρτήσεις, τότε τα bytes των άλλων συναρτήσεων δεν συμπεριλαμβάνονται.
-        Τα ατομικά bytes είναι χρήσιμα για να κατανοήσετε πού δεσμεύθηκε ή
+        Τα bytes του «self» είναι χρήσιμα για να κατανοήσετε πού δεσμεύθηκε ή
         αποδεσμεύθηκε μνήμη στο πρόγραμμα.
 
 ## Call tree "badges" (icons) with tooltips
@@ -201,27 +226,27 @@ CallTreeSidebar--call-node-details = Λεπτομέρειες κόμβου κλ�
 CallTreeSidebar--traced-running-time =
     .label = Ιχνηλατημένος χρόνος εκτέλεσης
 CallTreeSidebar--traced-self-time =
-    .label = Ιχνηλατημένος ιδιοχρόνος
+    .label = Ιχνηλατημένος χρόνος self
 CallTreeSidebar--running-time =
     .label = Χρόνος εκτέλεσης
 CallTreeSidebar--self-time =
-    .label = Iδιοχρόνος
+    .label = Χρόνος self
 CallTreeSidebar--running-samples =
     .label = Εκτελούμενα δείγματα
 CallTreeSidebar--self-samples =
-    .label = Ιδιοδείγματα
+    .label = Δείγματα self
 CallTreeSidebar--running-size =
     .label = Μέγεθος εκτέλεσης
 CallTreeSidebar--self-size =
-    .label = Ιδιομέγεθος
+    .label = Μέγεθος self
 CallTreeSidebar--categories = Κατηγορίες
 CallTreeSidebar--implementation = Υλοποίηση
 CallTreeSidebar--running-milliseconds = Χιλιοστά δευτερολέπτου εκτέλεσης
 CallTreeSidebar--running-sample-count = Εκτελούμενος αριθμός δειγμάτων
 CallTreeSidebar--running-bytes = Bytes εκτέλεσης
-CallTreeSidebar--self-milliseconds = Χιλιοστά δευτερολέπτου συνάρτησης
-CallTreeSidebar--self-sample-count = Αριθμός ιδιοδειγμάτων
-CallTreeSidebar--self-bytes = Ιδιο-bytes
+CallTreeSidebar--self-milliseconds = Χιλιοστά δευτερολέπτου self
+CallTreeSidebar--self-sample-count = Πλήθος δειγμάτων self
+CallTreeSidebar--self-bytes = Self bytes
 
 ## CompareHome
 ## This is used in the page to compare two profiles.
@@ -326,6 +351,13 @@ Home--record-instructions =
 Home--instructions-content =
     Η καταγραφή των προφίλ επιδόσεων απαιτεί το <a>{ -firefox-brand-name }</a>.
     Ωστόσο, τα υπάρχοντα προφίλ μπορούν να προβληθούν σε όλα τα σύγχρονα προγράμματα περιήγησης.
+Home--fenix-instructions-directly =
+    Μπορείτε να καταγράψετε προφίλ για το { -firefox-android-brand-name } απευθείας σε αυτήν τη συσκευή. Για
+    περισσότερες πληροφορίες, διαβάστε το <a>Καταγραφή προφίλ του { -firefox-android-brand-name } απευθείας στη συσκευή</a>.
+Home--fenix-instructions-remotely =
+    Μπορείτε επίσης να καταγράψετε προφίλ για το { -firefox-android-brand-name } απομακρυσμένα από το { -firefox-brand-name }
+    για υπολογιστές. Για περισσότερες πληροφορίες, συμβουλευτείτε την τεκμηρίωση:
+    <a>Απομακρυσμένη καταγραφή προφίλ του { -firefox-android-brand-name }</a>.
 Home--record-instructions-start-stop = Διακοπή και έναρξη δημιουργίας προφίλ
 Home--record-instructions-capture-load = Καταγραφή και φόρτωση προφίλ
 Home--profiler-motto = Καταγράψτε ένα προφίλ επιδόσεων. Αναλύστε το. Μοιραστείτε το. Κάντε ταχύτερο τον ιστό.
@@ -333,6 +365,7 @@ Home--additional-content-title = Φόρτωση υπαρχόντων προφί�
 Home--additional-content-content = Μπορείτε να <strong>σύρετε και να εναποθέσετε</strong> ένα αρχείο προφίλ εδώ για φόρτωση, ή:
 Home--compare-recordings-info = Μπορείτε επίσης να συγκρίνετε καταγραφές. <a>Άνοιγμα περιβάλλοντος σύγκρισης.</a>
 Home--your-recent-uploaded-recordings-title = Πρόσφατα μεταφορτωμένες καταγραφές
+Home--dark-mode-title = Σκουρόχρωμη λειτουργία
 # We replace the elements such as <perf> and <simpleperf> with links to the
 # documentation to use these tools.
 Home--load-files-from-other-tools2 =
@@ -360,7 +393,7 @@ IdleSearchField--search-input =
 ## JsTracerSettings
 ## JSTracer is an experimental feature and it's currently disabled. See Bug 1565788.
 
-JsTracerSettings--show-only-self-time = Εμφάνιση μόνο ιδιοχρόνου
+JsTracerSettings--show-only-self-time = Εμφάνιση μόνο χρόνου self
     .title = Εμφάνιση μόνο του χρόνου που χρησιμοποιήθηκε σε κόμβο κλήσεων, αγνοώντας τους θυγατρικούς του.
 
 ## ListOfPublishedProfiles
@@ -424,6 +457,13 @@ MarkerContextMenu--select-the-sender-thread = Επιλέξτε το νήμα α�
 #   $filter (String) - Search string that will be used to filter the markers.
 MarkerFiltersContextMenu--drop-samples-outside-of-markers-matching = Απόρριψη δειγμάτων εκτός των δεικτών που αντιστοιχούν στο «<strong>{ $filter }</strong>»
 
+## MarkerCopyTableContextMenu
+## This is the menu when the copy icon is clicked in Marker Chart and Marker
+## Table panels.
+
+MarkerCopyTableContextMenu--copy-table-as-plain = Αντιγραφή πίνακα δεικτών ως απλού κειμένου
+MarkerCopyTableContextMenu--copy-table-as-markdown = Αντιγραφή πίνακα δεικτών ως Markdown
+
 ## MarkerSettings
 ## This is used in all panels related to markers.
 
@@ -432,6 +472,14 @@ MarkerSettings--panel-search =
     .title = Εμφάνιση μόνο των σημαδιών που αντιστοιχούν σε ένα συγκεκριμένο όνομα
 MarkerSettings--marker-filters =
     .title = Φίλτρα δείκτη
+MarkerSettings--copy-table =
+    .title = Αντιγραφή πίνακα ως κειμένου
+# This string is used when the user tries to copy a marker table with
+# more than 10000 rows.
+# Variable:
+#   $rows (Number) - Number of rows the marker table has
+#   $maxRows (Number) - Number of maximum rows that can be copied
+MarkerSettings--copy-table-exceeed-max-rows = Ο αριθμός σειρών υπερβαίνει το όριο: { $rows } > { $maxRows }. Θα αντιγραφούν μόνο οι πρώτες { $maxRows } σειρές.
 
 ## MarkerSidebar
 ## This is the sidebar component that is used in Marker Table panel.
@@ -549,7 +597,8 @@ MenuButtons--metaInfo--buffer-duration-seconds =
 MenuButtons--metaInfo--buffer-duration-unlimited = Απεριόριστη
 MenuButtons--metaInfo--application = Εφαρμογή
 MenuButtons--metaInfo--name-and-version = Όνομα και έκδοση:
-MenuButtons--metaInfo--application-uptime = Χρόνος λειτουργίας:
+# The time between application startup and when the profiler was started
+MenuButtons--metaInfo--application-uptime2 = Χρόνος λειτουργίας:
 MenuButtons--metaInfo--update-channel = Κανάλι ενημερώσεων:
 MenuButtons--metaInfo--build-id = ID δομής:
 MenuButtons--metaInfo--build-type = Τύπος δομής:
@@ -864,6 +913,11 @@ TrackPower--tooltip-power-watt = { $value } W
 #   $value (String) - the power value at this location
 TrackPower--tooltip-power-milliwatt = { $value } mW
     .label = Ισχύς
+# This is used in the tooltip when the instant power value uses the microwatt unit.
+# Variables:
+#   $value (String) - the power value at this location
+TrackPower--tooltip-power-microwatt = { $value } μW
+    .label = Ισχύς
 # This is used in the tooltip when the power value uses the kilowatt unit.
 # Variables:
 #   $value (String) - the power value at this location
@@ -1013,6 +1067,12 @@ TransformNavigator--focus-subtree = Εστίαση κόμβου: { $item }
 # Variables:
 #   $item (String) - Name of the function that transform applied to.
 TransformNavigator--focus-function = Εστίαση: { $item }
+# "Focus self" transform.
+# See: https://profiler.firefox.com/docs/#/./guide-filtering-call-trees?id=focus-on-function-self
+# Also see the translation note above CallNodeContextMenu--transform-focus-self.
+# Variables:
+#   $item (String) - Name of the function that transform applied to.
+TransformNavigator--focus-self = Εστίαση στο self: { $item }
 # "Focus category" transform. The word "Focus" has the meaning of an adjective here.
 # See: https://profiler.firefox.com/docs/#/./guide-filtering-call-trees?id=focus-category
 # Variables:
@@ -1158,6 +1218,17 @@ AssemblyView--show-button =
 # Assembly refers to the low-level programming language.
 AssemblyView--hide-button =
     .title = Απόκρυψη προβολής assembly
+# The "◀" button above the assembly view.
+AssemblyView--prev-button =
+    .title = Προηγούμενο
+# The "▶" button above the assembly view.
+AssemblyView--next-button =
+    .title = Επόμενο
+# The label showing the current position and total count above the assembly view.
+# Variables:
+#   $current (Number) - The current position (1-indexed).
+#   $total (Number) - The total count.
+AssemblyView--position-label = { $current } από { $total }
 
 ## UploadedRecordingsHome
 ## This is the page that displays all the profiles that user has uploaded.

@@ -33,6 +33,14 @@ type Props<Item> = {
   readonly onMouseLeave?: (e: { nativeEvent: MouseEvent }) => unknown;
   // Defaults to false. Set to true if the chart should persist the tooltips on click.
   readonly stickyTooltips?: boolean;
+  // Selected item coming from URL or other non-click mechanism.
+  readonly selectedItem?: Item | null;
+  // Pre-computed canvas-relative offset for the tooltip of the selected item
+  // (null when the item is not currently visible in the viewport).
+  readonly selectedItemTooltipOffset?: {
+    offsetX: CssPixels;
+    offsetY: CssPixels;
+  } | null;
 };
 
 // The naming of the X and Y coordinates here correspond to the ones
@@ -327,6 +335,17 @@ export class ChartCanvas<Item> extends React.Component<
 
   _onDoubleClick = () => {
     this.props.onDoubleClickItem(this.state.hoveredItem);
+
+    if (this.props.stickyTooltips) {
+      // The double click is received as a sequence of click + click + dblclick.
+      // The each click sets the selectedItem inside _onClick.
+      //
+      // Unset the selectedItem here to differentiate the behavior between
+      // the single click vs the double clicks.
+      this.setState(() => ({
+        selectedItem: null,
+      }));
+    }
   };
 
   _getHoveredItemInfo = (): React.ReactNode => {
@@ -348,6 +367,28 @@ export class ChartCanvas<Item> extends React.Component<
     this._canvas = canvas;
   };
 
+  _syncSelectedItemFromProp = () => {
+    const { selectedItem, selectedItemTooltipOffset } = this.props;
+
+    if (selectedItem === undefined || selectedItem === null) {
+      this.setState({ selectedItem: null });
+      return;
+    }
+
+    if (!selectedItemTooltipOffset || !this._canvas) {
+      // Keep selectedItem set, so the tooltip stays at
+      // its last known position rather than disappearing.
+      this.setState({ selectedItem });
+      return;
+    }
+
+    const { offsetX, offsetY } = selectedItemTooltipOffset;
+    const canvasRect = this._canvas.getBoundingClientRect();
+    const pageX = canvasRect.left + window.scrollX + offsetX;
+    const pageY = canvasRect.top + window.scrollY + offsetY;
+    this.setState({ selectedItem, pageX, pageY });
+  };
+
   override UNSAFE_componentWillReceiveProps() {
     // It is possible that the data backing the chart has been
     // changed, for instance after symbolication. Clear the
@@ -364,8 +405,60 @@ export class ChartCanvas<Item> extends React.Component<
     }
   }
 
+  override componentDidMount() {
+    window.addEventListener('profiler-theme-change', this._onThemeChange);
+
+    // If the viewport hasn't been laid out yet,
+    // componentDidUpdate will pick it up once it becomes non-zero.
+    if (
+      this.props.selectedItem !== undefined &&
+      this.props.containerWidth !== 0
+    ) {
+      this._syncSelectedItemFromProp();
+    }
+  }
+
+  override componentWillUnmount() {
+    window.removeEventListener('profiler-theme-change', this._onThemeChange);
+  }
+
+  _onThemeChange = () => {
+    this._scheduleDraw();
+  };
+
   override componentDidUpdate(prevProps: Props<Item>, prevState: State<Item>) {
     if (prevProps !== this.props) {
+      if (this.props.selectedItem !== undefined) {
+        const selectedItemChanged =
+          this.props.selectedItem !== prevProps.selectedItem;
+        const canvasJustGotSize =
+          prevProps.containerWidth === 0 && this.props.containerWidth !== 0;
+        const offsetChanged =
+          this.props.selectedItemTooltipOffset !==
+          prevProps.selectedItemTooltipOffset;
+
+        // The item was already set internally (eg, via click handler),
+        // so skip the prop-driven sync which would overwrite that position.
+        const alreadySetInternally =
+          selectedItemChanged &&
+          hoveredItemsAreEqual(
+            this.state.selectedItem,
+            this.props.selectedItem
+          );
+
+        const offsetSyncRelevant =
+          offsetChanged &&
+          !selectedItemChanged &&
+          this.state.selectedItem !== null;
+
+        if (
+          !alreadySetInternally &&
+          (selectedItemChanged || canvasJustGotSize || offsetSyncRelevant)
+        ) {
+          this._syncSelectedItemFromProp();
+        }
+      }
+
       if (
         this.state.selectedItem !== null &&
         prevState.selectedItem === this.state.selectedItem
@@ -377,6 +470,20 @@ export class ChartCanvas<Item> extends React.Component<
         if (info === null) {
           this.setState({ selectedItem: null });
         }
+      }
+
+      if (
+        this._canvas &&
+        this._canvas.width !== 0 &&
+        this.props.containerWidth === 0
+      ) {
+        // This is a temporary default state triggered by Viewport,
+        // for the viewportNeedsUpdate condition.
+        //
+        // Another setState call with the updated containerWidth/containerHeight
+        // will be performed and componentDidUpdate will be called again.
+        // We should ignore this update, in order to avoid an unnecessary flash.
+        return;
       }
       this._scheduleDraw();
     } else if (

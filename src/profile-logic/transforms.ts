@@ -20,7 +20,7 @@ import {
   getSearchFilteredMarkerIndexes,
   stringsToMarkerRegExps,
 } from '../profile-logic/marker-data';
-import { shallowCloneFrameTable, getEmptyStackTable } from './data-structures';
+import { getEmptyStackTable } from './data-structures';
 import { getFunctionName } from './function-info';
 import { splitSearchString } from '../utils/string';
 
@@ -46,9 +46,15 @@ import type {
   MarkerSchemaByName,
   CategoryList,
   Milliseconds,
+  ProfileIndexTranslationMaps,
 } from 'firefox-profiler/types';
 import type { CallNodeInfo } from 'firefox-profiler/profile-logic/call-node-info';
 import type { StringTable } from 'firefox-profiler/utils/string-table';
+import {
+  translateCallNodePath,
+  translateFuncIndex,
+  translateResourceIndex,
+} from './index-translation';
 
 /**
  * This file contains the functions and logic for working with and applying transforms
@@ -58,6 +64,7 @@ import type { StringTable } from 'firefox-profiler/utils/string-table';
 const TRANSFORM_OBJ: { [key in TransformType]: true } = {
   'focus-subtree': true,
   'focus-function': true,
+  'focus-self': true,
   'merge-call-node': true,
   'merge-function': true,
   'drop-function': true,
@@ -85,6 +92,9 @@ ALL_TRANSFORM_TYPES.forEach((transform: TransformType) => {
       break;
     case 'focus-function':
       shortKey = 'ff';
+      break;
+    case 'focus-self':
+      shortKey = 'ffs';
       break;
     case 'focus-category':
       shortKey = 'fg';
@@ -239,6 +249,20 @@ export function parseTransforms(transformString: string): TransformStack {
         }
         break;
       }
+      case 'focus-self': {
+        // e.g. "ffs-js-325"
+        const [, implementation, funcIndexRaw] = tuple;
+        const funcIndex = parseInt(funcIndexRaw, 10);
+        if (isNaN(funcIndex) || funcIndex < 0) {
+          break;
+        }
+        transforms.push({
+          type: 'focus-self',
+          funcIndex,
+          implementation: toValidImplementationFilter(implementation),
+        });
+        break;
+      }
       case 'focus-category': {
         // e.g. "fg-3"
         const [, categoryRaw] = tuple;
@@ -359,6 +383,7 @@ export function stringifyTransforms(transformStack: TransformStack): string {
         case 'collapse-recursion':
           return `${shortKey}-${transform.funcIndex}`;
         case 'collapse-direct-recursion':
+        case 'focus-self':
           return `${shortKey}-${transform.implementation}-${transform.funcIndex}`;
         case 'focus-subtree':
         case 'merge-call-node': {
@@ -444,6 +469,7 @@ export function getTransformLabelL10nIds(
         funcIndex = transform.callNodePath[transform.callNodePath.length - 1];
         break;
       case 'focus-function':
+      case 'focus-self':
       case 'merge-function':
       case 'drop-function':
       case 'collapse-direct-recursion':
@@ -462,6 +488,8 @@ export function getTransformLabelL10nIds(
         return { l10nId: 'TransformNavigator--focus-subtree', item: funcName };
       case 'focus-function':
         return { l10nId: 'TransformNavigator--focus-function', item: funcName };
+      case 'focus-self':
+        return { l10nId: 'TransformNavigator--focus-self', item: funcName };
       case 'merge-call-node':
         return {
           l10nId: 'TransformNavigator--merge-call-node',
@@ -511,6 +539,11 @@ export function applyTransformToCallNodePath(
       );
     case 'focus-function':
       return _startCallNodePathWithFunction(transform.funcIndex, callNodePath);
+    case 'focus-self':
+      return _focusFunctionSelfInCallNodePath(
+        transform.funcIndex,
+        callNodePath
+      );
     case 'focus-category':
       return _removeOtherCategoryFunctionsInNodePathWithFunction(
         transform.category,
@@ -574,6 +607,14 @@ function _startCallNodePathWithFunction(
 ): CallNodePath {
   const startIndex = callNodePath.indexOf(funcIndex);
   return startIndex === -1 ? [] : callNodePath.slice(startIndex);
+}
+
+function _focusFunctionSelfInCallNodePath(
+  funcIndex: IndexIntoFuncTable,
+  callNodePath: CallNodePath
+): CallNodePath {
+  const containsFunc = callNodePath.indexOf(funcIndex) !== -1;
+  return containsFunc ? [funcIndex] : [];
 }
 
 function _mergeNodeInCallNodePath(
@@ -894,145 +935,50 @@ export function dropFunction(
   );
 }
 
+/**
+ * Substitute any functions of a given resource with the resource's
+ * "resource function", and then collapse consecutive frames with that
+ * function into a single frame.
+ *
+ * For the "collapse consecutive frames" part, the implementation filter
+ * is relevant; this works the same as for the "collapse direct recursion"
+ * transform. In fact, the "collapse resource" transform is implemented
+ * with the help of the "collapse direct recursion" transform.
+ */
 export function collapseResource(
   thread: Thread,
   resourceIndexToCollapse: IndexIntoResourceTable,
   collapsedFuncIndex: IndexIntoFuncTable,
-  implementation: ImplementationFilter,
-  defaultCategory: IndexIntoCategoryList
+  implementation: ImplementationFilter
 ): Thread {
-  const { stackTable, funcTable, frameTable } = thread;
-  const newFrameTable = shallowCloneFrameTable(frameTable);
-  const newStackTable = getEmptyStackTable();
-  const oldStackToNewStack: Map<
-    IndexIntoStackTable | null,
-    IndexIntoStackTable | null
-  > = new Map();
-  const prefixStackToCollapsedStack: Map<
-    IndexIntoStackTable | null, // prefix stack index
-    IndexIntoStackTable | null // collapsed stack index
-  > = new Map();
-  const collapsedStacks: Set<IndexIntoStackTable | null> = new Set();
-  const funcMatchesImplementation = FUNC_MATCHES[implementation];
+  // Strategy: remap all frames from the given resource to collapsedFuncIndex,
+  // then delegate to collapseDirectRecursion to merge consecutive frames with
+  // that func into one. This works because any adjacent frames from the same
+  // resource now share a func, which is exactly what collapseDirectRecursion
+  // collapses.
+  const { funcTable, frameTable } = thread;
 
-  // A root stack's prefix will be null. Maintain that relationship from old to new
-  // stacks by mapping from null to null.
-  oldStackToNewStack.set(null, null);
-  // A new func and frame will be created on the first stack that is found that includes
-  // the given resource.
-  let collapsedFrameIndex;
-
-  for (let stackIndex = 0; stackIndex < stackTable.length; stackIndex++) {
-    const prefix = stackTable.prefix[stackIndex];
-    const frameIndex = stackTable.frame[stackIndex];
-    const category = stackTable.category[stackIndex];
-    const subcategory = stackTable.subcategory[stackIndex];
-    const funcIndex = frameTable.func[frameIndex];
+  // Remap every frame whose func belongs to the collapsed resource.
+  const newFrameTableFuncCol = frameTable.func.slice();
+  for (let i = 0; i < frameTable.length; i++) {
+    const funcIndex = frameTable.func[i];
     const resourceIndex = funcTable.resource[funcIndex];
-    const newStackPrefix = oldStackToNewStack.get(prefix);
-
-    if (newStackPrefix === undefined) {
-      throw new Error('newStackPrefix must not be undefined');
-    }
     if (resourceIndex === resourceIndexToCollapse) {
-      // The stack matches this resource.
-      if (!collapsedStacks.has(newStackPrefix)) {
-        // The prefix is not a collapsed stack. So this stack will not collapse into its
-        // prefix stack. But it might collapse into a sibling stack, if there exists a
-        // sibling with the same resource. Check if a collapsed stack with the same
-        // prefix (i.e. a collapsed sibling) exists.
-
-        const existingCollapsedStack = prefixStackToCollapsedStack.get(prefix);
-        if (existingCollapsedStack === undefined) {
-          // Create a new collapsed frame.
-
-          // Compute the next indexes
-          const newStackIndex = newStackTable.length++;
-          collapsedStacks.add(newStackIndex);
-          oldStackToNewStack.set(stackIndex, newStackIndex);
-          prefixStackToCollapsedStack.set(prefix, newStackIndex);
-
-          if (collapsedFrameIndex === undefined) {
-            collapsedFrameIndex = newFrameTable.length++;
-            // Add the collapsed frame
-            newFrameTable.address.push(frameTable.address[frameIndex]);
-            newFrameTable.inlineDepth.push(frameTable.inlineDepth[frameIndex]);
-            newFrameTable.category.push(frameTable.category[frameIndex]);
-            newFrameTable.subcategory.push(frameTable.subcategory[frameIndex]);
-            newFrameTable.func.push(collapsedFuncIndex);
-            newFrameTable.nativeSymbol.push(
-              frameTable.nativeSymbol[frameIndex]
-            );
-            newFrameTable.line.push(frameTable.line[frameIndex]);
-            newFrameTable.column.push(frameTable.column[frameIndex]);
-            newFrameTable.innerWindowID.push(
-              frameTable.innerWindowID[frameIndex]
-            );
-          }
-
-          // Add the new stack.
-          newStackTable.prefix.push(newStackPrefix);
-          newStackTable.frame.push(collapsedFrameIndex);
-          newStackTable.category.push(category);
-          newStackTable.subcategory.push(subcategory);
-        } else {
-          // A collapsed stack at this level already exists, use that one.
-          if (existingCollapsedStack === null) {
-            throw new Error('existingCollapsedStack cannot be null');
-          }
-          oldStackToNewStack.set(stackIndex, existingCollapsedStack);
-          if (newStackTable.category[existingCollapsedStack] !== category) {
-            // Conflicting origin stack categories -> default category + subcategory.
-            newStackTable.category[existingCollapsedStack] = defaultCategory;
-            newStackTable.subcategory[existingCollapsedStack] = 0;
-          } else if (
-            newStackTable.subcategory[existingCollapsedStack] !== subcategory
-          ) {
-            // Conflicting origin stack subcategories -> "Other" subcategory.
-            newStackTable.subcategory[existingCollapsedStack] = 0;
-          }
-        }
-      } else {
-        // The prefix was already collapsed, use that one.
-        oldStackToNewStack.set(stackIndex, newStackPrefix);
-      }
-    } else {
-      if (
-        !funcMatchesImplementation(thread, funcIndex) &&
-        newStackPrefix !== null
-      ) {
-        // This function doesn't match the implementation filter.
-        const prefixFrame = newStackTable.frame[newStackPrefix];
-        const prefixFunc = newFrameTable.func[prefixFrame];
-        const prefixResource = funcTable.resource[prefixFunc];
-
-        if (prefixResource === resourceIndexToCollapse) {
-          // This stack's prefix did match the collapsed resource, map the stack
-          // to the already collapsed stack and move on.
-          oldStackToNewStack.set(stackIndex, newStackPrefix);
-          continue;
-        }
-      }
-      // This stack isn't part of the collapsed resource. Copy over the previous stack.
-      const newStackIndex = newStackTable.length++;
-      newStackTable.prefix.push(newStackPrefix);
-      newStackTable.frame.push(frameIndex);
-      newStackTable.category.push(category);
-      newStackTable.subcategory.push(subcategory);
-      oldStackToNewStack.set(stackIndex, newStackIndex);
+      newFrameTableFuncCol[i] = collapsedFuncIndex;
     }
   }
 
   const newThread = {
     ...thread,
-    frameTable: newFrameTable,
+    frameTable: {
+      ...frameTable,
+      func: newFrameTableFuncCol,
+    },
   };
 
-  return updateThreadStacks(
-    newThread,
-    newStackTable,
-    getMapStackUpdater(oldStackToNewStack)
-  );
+  // Now collapse consecutive runs of collapsedFuncIndex frames, taking the
+  // implementation filter into account to determine "consecutiveness".
+  return collapseDirectRecursion(newThread, collapsedFuncIndex, implementation);
 }
 
 export function collapseDirectRecursion(
@@ -1443,6 +1389,53 @@ export function focusFunction(
   });
 }
 
+export function focusSelf(
+  thread: Thread,
+  funcIndexToFocus: IndexIntoFuncTable,
+  implementation: ImplementationFilter
+): Thread {
+  return timeCode('focusSelf', () => {
+    const { stackTable, frameTable } = thread;
+
+    const funcMatchesImplementation = FUNC_MATCHES[implementation];
+
+    const shouldKeepStack = new Uint8Array(stackTable.length);
+
+    const newPrefixCol = stackTable.prefix.slice();
+
+    for (let stackIndex = 0; stackIndex < stackTable.length; stackIndex++) {
+      const frameIndex = stackTable.frame[stackIndex];
+      const funcIndex = frameTable.func[frameIndex];
+
+      if (funcIndex === funcIndexToFocus) {
+        shouldKeepStack[stackIndex] = 1;
+        newPrefixCol[stackIndex] = null;
+      } else {
+        const prefix = newPrefixCol[stackIndex];
+        if (
+          prefix !== null &&
+          shouldKeepStack[prefix] === 1 &&
+          !funcMatchesImplementation(thread, funcIndex)
+        ) {
+          shouldKeepStack[stackIndex] = 1;
+        }
+      }
+    }
+
+    const newStackTable = {
+      ...stackTable,
+      prefix: newPrefixCol,
+    };
+
+    return updateThreadStacks(thread, newStackTable, (oldStack) => {
+      if (oldStack === null || shouldKeepStack[oldStack] === 0) {
+        return null;
+      }
+      return oldStack;
+    });
+  });
+}
+
 export function focusCategory(thread: Thread, category: IndexIntoCategoryList) {
   return timeCode('focusCategory', () => {
     const { stackTable } = thread;
@@ -1828,7 +1821,6 @@ export function filterSamples(
 export function applyTransform(
   thread: Thread,
   transform: Transform,
-  defaultCategory: IndexIntoCategoryList,
   getMarker: (markerIndex: MarkerIndex) => Marker,
   markerIndexes: MarkerIndex[],
   markerSchemaByName: MarkerSchemaByName,
@@ -1859,6 +1851,8 @@ export function applyTransform(
       return dropFunction(thread, transform.funcIndex);
     case 'focus-function':
       return focusFunction(thread, transform.funcIndex);
+    case 'focus-self':
+      return focusSelf(thread, transform.funcIndex, transform.implementation);
     case 'focus-category':
       return focusCategory(thread, transform.category);
     case 'collapse-resource':
@@ -1866,8 +1860,7 @@ export function applyTransform(
         thread,
         transform.resourceIndex,
         transform.collapsedFuncIndex,
-        transform.implementation,
-        defaultCategory
+        transform.implementation
       );
     case 'collapse-direct-recursion':
       return collapseDirectRecursion(
@@ -1892,4 +1885,226 @@ export function applyTransform(
     default:
       throw assertExhaustiveCheck(transform);
   }
+}
+
+export function translateTransform(
+  transform: Transform,
+  translationMaps: ProfileIndexTranslationMaps
+): Transform | null {
+  const { type } = transform;
+  switch (type) {
+    case 'focus-subtree': {
+      const newCallNodePath = translateCallNodePath(
+        transform.callNodePath,
+        translationMaps
+      );
+      if (newCallNodePath === null) {
+        // If any of the functions in the focused call node path are missing,
+        // that means we don't have any samples in the sanitized thread which
+        // contain that function in their stack, which means that the filtered
+        // thread was already empty.
+        // Drop this transform because it's not useful to share an empty view.
+        return null;
+      }
+      return {
+        type,
+        callNodePath: newCallNodePath,
+        implementation: transform.implementation,
+        inverted: transform.inverted,
+      };
+    }
+    case 'focus-function': {
+      const newFuncIndex = translateFuncIndex(
+        transform.funcIndex,
+        translationMaps
+      );
+      if (newFuncIndex === null) {
+        // If the focused function is missing, that means we don't have any
+        // samples in the sanitized thread which contain this function in their
+        // stack, which means that the filtered thread was already empty.
+        // Drop this transform because it's not useful to share an empty view.
+        return null;
+      }
+      return {
+        type,
+        funcIndex: newFuncIndex,
+      };
+    }
+    case 'focus-self': {
+      const newFuncIndex = translateFuncIndex(
+        transform.funcIndex,
+        translationMaps
+      );
+      if (newFuncIndex === null) {
+        // If the focused function is missing, that means we don't have any
+        // samples in the sanitized thread which contain this function in their
+        // stack, which means that the filtered thread was already empty.
+        // Drop this transform because it's not useful to share an empty view.
+        return null;
+      }
+      return {
+        type,
+        funcIndex: newFuncIndex,
+        implementation: transform.implementation,
+      };
+    }
+    case 'merge-call-node': {
+      const newCallNodePath = translateCallNodePath(
+        transform.callNodePath,
+        translationMaps
+      );
+      if (newCallNodePath === null) {
+        // If any of the functions in the merged call node path are missing,
+        // that means we don't have any samples in the sanitized thread which
+        // contain that function in their stack, which means that this transform
+        // was a no-op in the range filtered thread.
+        // We can just drop this transform.
+        return null;
+      }
+      return {
+        type,
+        callNodePath: newCallNodePath,
+        implementation: transform.implementation,
+      };
+    }
+    case 'merge-function': {
+      const newFuncIndex = translateFuncIndex(
+        transform.funcIndex,
+        translationMaps
+      );
+      if (newFuncIndex === null) {
+        // If the merged function is missing, that means we don't have any
+        // samples in the sanitized thread which contain this function in their
+        // stack, which means that this transform was a no-op in the range
+        // filtered thread.
+        // We can just drop this transform.
+        return null;
+      }
+      return {
+        type,
+        funcIndex: newFuncIndex,
+      };
+    }
+    case 'drop-function': {
+      const newFuncIndex = translateFuncIndex(
+        transform.funcIndex,
+        translationMaps
+      );
+      if (newFuncIndex === null) {
+        // If the dropped function is missing, that means we don't have any
+        // samples in the sanitized thread which contain this function in their
+        // stack, which means that this transform was a no-op in the range
+        // filtered thread.
+        // We can just drop this transform.
+        return null;
+      }
+      return {
+        type,
+        funcIndex: newFuncIndex,
+      };
+    }
+    case 'collapse-resource': {
+      const newResourceIndex = translateResourceIndex(
+        transform.resourceIndex,
+        translationMaps
+      );
+      if (newResourceIndex === null) {
+        // If the collapsed resource is missing, that means we don't have any
+        // samples in the sanitized thread which contain any function with this
+        // resource in their stack, which means that this transform was a no-op
+        // in the range filtered thread.
+        // We can just drop this transform.
+        return null;
+      }
+      const newCollapsedFuncIndex =
+        translationMaps.newFuncCount + newResourceIndex;
+      return {
+        type,
+        resourceIndex: newResourceIndex,
+        implementation: transform.implementation,
+        collapsedFuncIndex: newCollapsedFuncIndex,
+      };
+    }
+    case 'collapse-direct-recursion': {
+      const newFuncIndex = translateFuncIndex(
+        transform.funcIndex,
+        translationMaps
+      );
+      if (newFuncIndex === null) {
+        // If the recursive function is missing, that means we don't have any
+        // samples in the sanitized thread which contain this function in their
+        // stack, which means that this transform was a no-op in the range
+        // filtered thread.
+        // We can just drop this transform.
+        return null;
+      }
+      return {
+        type,
+        funcIndex: newFuncIndex,
+        implementation: transform.implementation,
+      };
+    }
+    case 'collapse-recursion': {
+      const newFuncIndex = translateFuncIndex(
+        transform.funcIndex,
+        translationMaps
+      );
+      if (newFuncIndex === null) {
+        // If the recursive function is missing, that means we don't have any
+        // samples in the sanitized thread which contain this function in their
+        // stack, which means that this transform was a no-op in the range
+        // filtered thread.
+        // We can just drop this transform.
+        return null;
+      }
+      return {
+        type,
+        funcIndex: newFuncIndex,
+      };
+    }
+    case 'collapse-function-subtree': {
+      const newFuncIndex = translateFuncIndex(
+        transform.funcIndex,
+        translationMaps
+      );
+      if (newFuncIndex === null) {
+        // If the collapsed function is missing, that means we don't have any
+        // samples in the sanitized thread which contain this function in their
+        // stack, which means that this transform was a no-op in the range
+        // filtered thread.
+        // We can just drop this transform.
+        return null;
+      }
+      return {
+        type,
+        funcIndex: newFuncIndex,
+      };
+    }
+    case 'focus-category': {
+      // We don't sanitize-away categories, so this transform doesn't need to
+      // be translated.
+      return transform;
+    }
+    case 'filter-samples': {
+      switch (transform.filterType) {
+        case 'marker-search': {
+          // This transform doesn't contain any data which needs to be translated.
+          return transform;
+        }
+        default:
+          throw assertExhaustiveCheck(transform.filterType);
+      }
+    }
+    default:
+      throw assertExhaustiveCheck(transform);
+  }
+}
+
+export function translateTransformStack(
+  transformStack: Transform[],
+  translationMaps: ProfileIndexTranslationMaps
+): Transform[] {
+  return transformStack
+    .map((t) => translateTransform(t, translationMaps))
+    .filter((t) => t !== null);
 }

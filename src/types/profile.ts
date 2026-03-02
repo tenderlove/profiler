@@ -117,6 +117,7 @@ export type RawSamplesTable = {
   time?: Milliseconds[];
   // If the `time` column is not present, then the `timeDeltas` column must be present.
   timeDeltas?: Milliseconds[];
+  argumentValues?: Array<number | null>;
   // An optional weight array. If not present, then the weight is assumed to be 1.
   // See the WeightType type for more information.
   weight: null | number[];
@@ -164,6 +165,7 @@ export type UnbalancedNativeAllocationsTable = {
   weight: Bytes[];
   weightType: 'bytes';
   stack: Array<IndexIntoStackTable | null>;
+  argumentValues?: Array<number | null>;
   length: number;
 };
 
@@ -503,6 +505,7 @@ export type RawCounterSamplesTable = {
   number?: number[];
   // The count of the data, for instance for memory this would be bytes.
   count: number[];
+  argumentValues?: Array<number | null>;
   length: number;
 };
 
@@ -654,11 +657,6 @@ export type RawThread = {
   jsAllocations?: JsAllocationsTable;
   nativeAllocations?: NativeAllocationsTable;
   markers: RawMarkerTable;
-  stackTable: RawStackTable;
-  frameTable: FrameTable;
-  funcTable: FuncTable;
-  resourceTable: ResourceTable;
-  nativeSymbols: NativeSymbolTable;
   jsTracer?: JsTracerTable;
   // If present and true, this thread was launched for a private browsing session only.
   // When false, it can still contain private browsing data if the profile was
@@ -670,6 +668,12 @@ export type RawThread = {
   // It's absent in Firefox 97 and before, or in Firefox 98+ when this thread
   // had no extra attribute at all.
   userContextId?: number;
+  tracedValuesBuffer?: string;
+  tracedObjectShapes?: Array<string[] | null>;
+  // If present, contains the list of innerWindowIDs for pages that this thread is
+  // related to (or, in practice, whose code may be executing in this thread).
+  // It's absent in profiles that don't use inner window IDs.
+  usedInnerWindowIDs?: InnerWindowID[];
 };
 
 export type ExtensionTable = {
@@ -941,6 +945,11 @@ export type SourceTable = {
 };
 
 export type RawProfileSharedData = {
+  stackTable: RawStackTable;
+  frameTable: FrameTable;
+  funcTable: FuncTable;
+  resourceTable: ResourceTable;
+  nativeSymbols: NativeSymbolTable;
   // Strings for profiles are collected into a single table, and are referred to by
   // their index by other tables.
   stringArray: string[];

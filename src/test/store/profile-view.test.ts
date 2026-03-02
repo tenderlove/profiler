@@ -757,10 +757,10 @@ describe('actions/ProfileView', function () {
       // use a BitSet to keep track of something that's per-stack (such as whether a stack matches
       // the search filter), the BitSet needs at least two 32-bit slots.
       const { profile } = getProfileFromTextSamples(`
-        A[lib:K][file:S]  A[lib:K][file:S]   A[lib:K][file:S]   D[lib:nNn][file:uV]  C[lib:m][file:t]
-        B[lib:L][file:t]  B[lib:L][file:t]   E[lib:O][file:Pq]
+        A[lib:K][file:S]  A[lib:K][file:S]     A[lib:K][file:S]   D[lib:nNn][file:uV]  C[lib:m][file:t]
+        B[lib:L][file:t]  B[lib:L][file:t]     E[lib:O][file:Pq]
         A[lib:K][file:S]  C[lib:m][file:t]
-        B[lib:L][file:t]  D[lib:n][file:uV]
+        B[lib:L][file:t]  D[lib:nNn][file:uV]
         B[lib:L][file:t]
         B[lib:L][file:t]
         B[lib:L][file:t]
@@ -911,7 +911,7 @@ describe('actions/ProfileView', function () {
       ]);
       dispatch(ProfileView.changeCallTreeSearchString('NN'));
       const callTree_NN = selectedThreadSelectors.getCallTree(getState());
-      // Keep all stacks which include function D, which has filename nNn
+      // Keep all stacks which include function D, which has lib name nNn
       expect(formatTree(callTree_NN)).toEqual([
         '- A (total: 1, self: —)',
         '  - B (total: 1, self: —)',
@@ -1046,11 +1046,11 @@ describe('actions/ProfileView', function () {
       const { dispatch, getState } = storeWithProfile(profile);
 
       expect(
-        selectedThreadSelectors.getViewOptions(getState()).selectedMarker
+        selectedThreadSelectors.getSelectedMarkerIndex(getState())
       ).toEqual(null);
       dispatch(ProfileView.changeSelectedMarker(0, 0));
       expect(
-        selectedThreadSelectors.getViewOptions(getState()).selectedMarker
+        selectedThreadSelectors.getSelectedMarkerIndex(getState())
       ).toEqual(0);
     });
   });
@@ -1971,14 +1971,15 @@ describe('snapshots of selectors/profile', function () {
     const G = funcNames.indexOf('G');
     for (
       let frameIdx = 0;
-      frameIdx < samplesThread.frameTable.length;
+      frameIdx < profile.shared.frameTable.length;
       frameIdx++
     ) {
-      const func = samplesThread.frameTable.func[frameIdx];
+      const func = profile.shared.frameTable.func[frameIdx];
       if (func === G) {
-        samplesThread.frameTable.innerWindowID[frameIdx] = innerWindowID;
+        profile.shared.frameTable.innerWindowID[frameIdx] = innerWindowID;
       }
     }
+    samplesThread.usedInnerWindowIDs = [innerWindowID];
 
     // Add in a thread with markers
     const markersThread = getThreadWithMarkers(profile.shared, [

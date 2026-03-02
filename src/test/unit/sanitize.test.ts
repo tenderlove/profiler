@@ -883,6 +883,22 @@ describe('sanitizePII', function () {
     expect(marker.flags).toBe('0xf00ba4');
   });
 
+  it('should sanitize traced argument values', function () {
+    const { originalProfile, sanitizedProfile } = setup({});
+    expect(
+      originalProfile.threads.filter((t) => t.tracedValuesBuffer).length
+    ).toBeGreaterThan(0);
+    expect(
+      originalProfile.threads.filter((t) => t.tracedValuesBuffer).length
+    ).toBeGreaterThan(0);
+    expect(
+      sanitizedProfile.threads.filter((t) => t.tracedValuesBuffer).length
+    ).toBe(0);
+    expect(
+      sanitizedProfile.threads.filter((t) => t.tracedObjectShapes).length
+    ).toBe(0);
+  });
+
   it('should sanitize the eTLD+1 field if urls are supposed to be sanitized', function () {
     // Create a simple profile with eTLD+1 field in its thread.
     const { profile } = getProfileFromTextSamples('A');
@@ -1155,6 +1171,7 @@ describe('sanitizePII', function () {
       } = addTabInformationToProfile(originalProfile);
       markTabIdsAsPrivateBrowsing(originalProfile, [privateTabTabID]);
       addInnerWindowIdToStacks(
+        originalProfile.shared,
         originalProfile.threads[0],
         /* listOfOperations */
         [
@@ -1221,9 +1238,9 @@ describe('sanitizePII', function () {
     expect(originalSourcesLength).toEqual(3);
 
     // Verify that different threads reference different sources
-    const thread0SourceIndex = profile.threads[0].funcTable.source[0];
-    const thread1SourceIndex = profile.threads[1].funcTable.source[0];
-    const thread2SourceIndex = profile.threads[2].funcTable.source[0];
+    const thread0SourceIndex = profile.shared.funcTable.source[0];
+    const thread1SourceIndex = profile.shared.funcTable.source[1];
+    const thread2SourceIndex = profile.shared.funcTable.source[2];
 
     expect(thread0SourceIndex).not.toBe(thread1SourceIndex);
     expect(thread1SourceIndex).not.toBe(thread2SourceIndex);
@@ -1244,8 +1261,7 @@ describe('sanitizePII', function () {
     expect(sanitizedProfile.shared.sources.length).toEqual(1);
 
     // The remaining thread should still have a valid source reference
-    const remainingSourceIndex =
-      sanitizedProfile.threads[0].funcTable.source[0];
+    const remainingSourceIndex = sanitizedProfile.shared.funcTable.source[0];
     expect(remainingSourceIndex).not.toBeNull();
     expect(remainingSourceIndex).toBeLessThan(
       sanitizedProfile.shared.sources.length

@@ -56,7 +56,6 @@ export type ThreadViewOptions = {
   readonly selectedInvertedCallNodePath: CallNodePath;
   readonly expandedNonInvertedCallNodePaths: PathSet;
   readonly expandedInvertedCallNodePaths: PathSet;
-  readonly selectedMarker: MarkerIndex | null;
   readonly selectedNetworkMarker: MarkerIndex | null;
   // Track the number of transforms to detect when they change via browser
   // navigation. This helps us know when to reset paths that may be invalid
@@ -82,6 +81,10 @@ export type RightClickedCallNode = {
 export type MarkerReference = {
   readonly threadsKey: ThreadsKey;
   readonly markerIndex: MarkerIndex;
+};
+
+export type SelectedMarkersPerThread = {
+  [key: ThreadsKey]: MarkerIndex | null;
 };
 
 /**
@@ -241,6 +244,8 @@ export type ZippedProfilesState = {
 
 export type SourceViewState = {
   scrollGeneration: number;
+  // Optional line number to scroll to in the source view.
+  scrollToLineNumber?: number;
   // Non-null if this source file was opened for a function from native code.
   // In theory, multiple different libraries can have source files with the same
   // path but different content.
@@ -251,9 +256,8 @@ export type SourceViewState = {
   // Index into source table. Contains information (filename and uuid) about the
   // source. Null if a function without a file path was double clicked.
   sourceIndex: IndexIntoSourceTable | null;
-  // Optional line number to scroll to in the source view.
-  // If not specified, the source view will scroll to the hottest line.
-  lineNumber?: number;
+  // The line number of the highlighted line in the source view.
+  highlightedLine: number | null;
 };
 
 export type AssemblyViewState = {
@@ -262,15 +266,17 @@ export type AssemblyViewState = {
   isOpen: boolean;
   // When this is incremented, the assembly view scrolls to the "hotspot" line.
   scrollGeneration: number;
-  // The native symbol for which the assembly code is being shown at the moment.
-  // Null if the initiating call node did not have a native symbol.
-  nativeSymbol: NativeSymbolInfo | null;
-  // The set of native symbols which contributed samples to the initiating call
-  // node. Often, this will just be one element (the same as `nativeSymbol`),
-  // but it can also be multiple elements, for example when double-clicking a
-  // function like `Vec::push` in an inverted call tree, if that function has
-  // been inlined into multiple different callers.
-  allNativeSymbolsForInitiatingCallNode: NativeSymbolInfo[];
+  // Optional instruction address to scroll to in the assembly view.
+  scrollToInstructionAddress?: number;
+  // The address of the highlighted instruction in the assembly view.
+  highlightedInstruction: number | null;
+  // The list of native symbols whose assembly code should be accessible in the
+  // assembly view. Often empty or just one element, but sometimes this can have
+  // multiple elements, for example the different JIT compilations of one JS function.
+  nativeSymbols: NativeSymbolInfo[];
+  // The index in `nativeSymbols` for the symbol whose assembly code is being shown at the moment.
+  // Null if nativeSymbols is empty.
+  currentNativeSymbol: number | null;
 };
 
 export type DecodedInstruction = {
@@ -370,6 +376,7 @@ export type ProfileSpecificUrlState = {
   tabFilter: TabID | null;
   legacyThreadOrder: ThreadIndex[] | null;
   legacyHiddenThreads: ThreadIndex[] | null;
+  selectedMarkers: SelectedMarkersPerThread;
 };
 
 export type UrlState = {

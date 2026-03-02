@@ -243,7 +243,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#fff",
+    "#ffffff",
   ],
   Array [
     "fillRect",
@@ -559,6 +559,31 @@ exports[`MarkerChart renders the normal marker chart and matches the snapshot 1`
             ⁨⁩
           </strong>
           ”
+        </div>
+      </nav>
+    </div>
+    <div>
+      <nav
+        class="react-contextmenu markerCopyTableContextMenu"
+        role="menu"
+        style="position: fixed; opacity: 0; pointer-events: none;"
+        tabindex="-1"
+      >
+        <div
+          aria-disabled="false"
+          class="react-contextmenu-item"
+          role="menuitem"
+          tabindex="-1"
+        >
+          Copy marker table as plain text
+        </div>
+        <div
+          aria-disabled="false"
+          class="react-contextmenu-item"
+          role="menuitem"
+          tabindex="-1"
+        >
+          Copy marker table as Markdown
         </div>
       </nav>
     </div>

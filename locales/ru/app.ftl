@@ -21,6 +21,16 @@ AppHeader--app-header = <header>{ -profiler-brand-name }</header> — <subheader
 AppHeader--github-icon =
     .title = Перейдите в наш репозиторий Git (он откроется в новом окне)
 
+## ThemeToggle
+## They are used at the top right side of the home page to switch between themes.
+
+ThemeToggle--system =
+    .title = Следовать системным настройкам тем
+ThemeToggle--light =
+    .title = Использовать светлую тему
+ThemeToggle--dark =
+    .title = Использовать тёмную тему
+
 ## AppViewRouter
 ## This is used for displaying errors when loading the application.
 
@@ -79,9 +89,24 @@ CallNodeContextMenu--transform-focus-function = Сфокусироваться �
     .title = { CallNodeContextMenu--transform-focus-function-title }
 CallNodeContextMenu--transform-focus-function-inverted = Сфокусироваться на функции (инвертировано)
     .title = { CallNodeContextMenu--transform-focus-function-title }
+
+## The translation for "self" in these strings should match the translation used
+## in CallTree--samples-self and CallTree--bytes-self. Alternatively it can be
+## translated as "self values" or "self time" (though "self time" is less desirable
+## because this menu item is also shown in "bytes" mode).
+
+CallNodeContextMenu--transform-focus-self-title =
+    Фокусировка на себе похожа на фокусировку на функции, но сохраняет только замеры
+    которые вносят вклад в собственное время функции. Замеры в вызовах
+    отбрасываются, а дерево вызовов перенаправляется на функцию, находящуюся в фокусе.
+CallNodeContextMenu--transform-focus-self = Сфокусироваться только на себе
+    .title = { CallNodeContextMenu--transform-focus-self-title }
+
+##
+
 CallNodeContextMenu--transform-focus-subtree = Сфокусироваться только на поддереве
     .title =
-        Фокусировка на поддереве приведет к удалению любого сэмпла, который не включает эту
+        Фокусировка на поддереве приведёт к удалению любого сэмпла, который не включает эту
         конкретную часть дерева вызовов. Она извлекает ветвь дерева вызовов,
         однако делает это только для этого единственного узла вызова. Все остальные вызовы
         функции игнорируются.
@@ -94,7 +119,7 @@ CallNodeContextMenu--transform-focus-category = Сфокусироваться �
         тем самым объединяя все узлы, принадлежащие к другой категории.
 CallNodeContextMenu--transform-collapse-function-subtree = Свернуть функцию
     .title =
-        Сворачивание функции приведет к удалению всего, что она вызвала, и назначению
+        Сворачивание функции приведёт к удалению всего, что она вызвала, и назначению
         функции всего времени. Это может помочь упростить профиль, который
         вызывает код, не нуждающийся в анализе.
 # This is used as the context menu item to apply the "Collapse resource" transform.
@@ -102,8 +127,8 @@ CallNodeContextMenu--transform-collapse-function-subtree = Свернуть фу
 #   $nameForResource (String) - Name of the resource to collapse.
 CallNodeContextMenu--transform-collapse-resource = Свернуть <strong>{ $nameForResource }</strong>
     .title =
-        Сворачивание ресурса сведет все вызовы к этому
-        ресурсу в один свернутый узел вызова.
+        Сворачивание ресурса сведёт все вызовы к этому
+        ресурсу в один свёрнутый узел вызова.
 CallNodeContextMenu--transform-collapse-recursion = Свернуть рекурсию
     .title =
         Сворачивание рекурсии удаляет вызовы, которые многократно рекурсируют в
@@ -328,6 +353,13 @@ Home--record-instructions =
 Home--instructions-content =
     Для записи профилей производительности требуется <a>{ -firefox-brand-name }</a>.
     Однако существующие профили можно просматривать в любом современном браузере.
+Home--fenix-instructions-directly =
+    { -firefox-android-brand-name } может быть профилирован непосредственно на этом устройстве. Для
+    для получения дополнительной информации прочитайте <a>Профилирование { -firefox-android-brand-name } непосредственно на устройстве</a>.
+Home--fenix-instructions-remotely =
+    Вы также можете профилировать { -firefox-android-brand-name } удалённо из { -firefox-brand-name }
+    для компьютера. Для получения дополнительной информации, пожалуйста, обратитесь к этой документации:
+    <a>Удалённое профилирование { -firefox-android-brand-name }</a>.
 Home--record-instructions-start-stop = Остановить и начать профилирование
 Home--record-instructions-capture-load = Запись и загрузка профиля
 Home--profiler-motto = Запишите профиль производительности. Проанализируйте его. Поделитесь им. Сделайте Интернет быстрее.
@@ -335,6 +367,7 @@ Home--additional-content-title = Загрузить существующие п�
 Home--additional-content-content = Вы можете <strong>перетащить</strong> сюда файл профиля, чтобы загрузить его, или:
 Home--compare-recordings-info = Вы также можете сравнить записи. <a>Откройте интерфейс сравнения.</a>
 Home--your-recent-uploaded-recordings-title = Ваши последние загруженные записи
+Home--dark-mode-title = Тёмная тема
 # We replace the elements such as <perf> and <simpleperf> with links to the
 # documentation to use these tools.
 Home--load-files-from-other-tools2 =
@@ -380,7 +413,7 @@ ListOfPublishedProfiles--uploaded-profile-information-list-empty = Профил�
 # This string is used below the 'Your recent uploaded recordings' list section.
 # Variables:
 #   $profilesRestCount (Number) - Remaining numbers of the uploaded profiles which are not listed under 'Your recent uploaded recordings'.
-ListOfPublishedProfiles--uploaded-profile-information-label = Просматривайте и управляйте всеми своими записями (еще { $profilesRestCount })
+ListOfPublishedProfiles--uploaded-profile-information-label = Просматривайте и управляйте всеми своими записями (ещё { $profilesRestCount })
 # Depending on the number of uploaded profiles, the message is different.
 # Variables:
 #   $uploadedProfileCount (Number) - Total numbers of the uploaded profiles.
@@ -427,6 +460,13 @@ MarkerContextMenu--select-the-sender-thread = Выберите цепочку о
 #   $filter (String) - Search string that will be used to filter the markers.
 MarkerFiltersContextMenu--drop-samples-outside-of-markers-matching = Отбрасывать семплы вне маркеров, соответствующих «<strong>{ $filter }</strong>».
 
+## MarkerCopyTableContextMenu
+## This is the menu when the copy icon is clicked in Marker Chart and Marker
+## Table panels.
+
+MarkerCopyTableContextMenu--copy-table-as-plain = Копировать таблицу маркеров как простой текст
+MarkerCopyTableContextMenu--copy-table-as-markdown = Копировать таблицу маркеров как Markdown
+
 ## MarkerSettings
 ## This is used in all panels related to markers.
 
@@ -435,6 +475,14 @@ MarkerSettings--panel-search =
     .title = Отображать только маркеры, совпадающие с определённым именем
 MarkerSettings--marker-filters =
     .title = Фильтры маркеров
+MarkerSettings--copy-table =
+    .title = Копировать таблицу как текст
+# This string is used when the user tries to copy a marker table with
+# more than 10000 rows.
+# Variable:
+#   $rows (Number) - Number of rows the marker table has
+#   $maxRows (Number) - Number of maximum rows that can be copied
+MarkerSettings--copy-table-exceeed-max-rows = Число строк превышает лимит: { $rows } > { $maxRows }. Будут скопированы только первые { $maxRows } строк.
 
 ## MarkerSidebar
 ## This is the sidebar component that is used in Marker Table panel.
@@ -563,7 +611,8 @@ MenuButtons--metaInfo--buffer-duration-seconds =
 MenuButtons--metaInfo--buffer-duration-unlimited = Неограничена
 MenuButtons--metaInfo--application = Приложение
 MenuButtons--metaInfo--name-and-version = Имя и версия:
-MenuButtons--metaInfo--application-uptime = Время работы:
+# The time between application startup and when the profiler was started
+MenuButtons--metaInfo--application-uptime2 = Время работы:
 MenuButtons--metaInfo--update-channel = Канал обновлений:
 MenuButtons--metaInfo--build-id = ID сборки:
 MenuButtons--metaInfo--build-type = Тип сборки:
@@ -772,8 +821,8 @@ StackSettings--use-data-source-label = Источник данных:
 StackSettings--call-tree-strategy-timing = Тайминги
     .title = Суммировать, используя выборочные стеки выполняемого кода с течением времени
 StackSettings--call-tree-strategy-js-allocations = Распределения Ruby
-    .title = Суммировать, используя выделенные байты Ruby (без отмены выделения)
-StackSettings--call-tree-strategy-native-retained-allocations = Сохраненная память
+    .title = Суммировать, используя выделенные байты JavaScript (без отмены выделения)
+StackSettings--call-tree-strategy-native-retained-allocations = Сохранённая память
     .title = Суммировать, используя байты памяти, которые были выделены и никогда не освобождались при текущем выборе предварительного просмотра
 StackSettings--call-tree-native-allocations = Выделенная память
     .title = Суммировать, используя выделенные байты памяти
@@ -877,6 +926,11 @@ TrackPower--tooltip-power-watt = { $value } Вт
 # Variables:
 #   $value (String) - the power value at this location
 TrackPower--tooltip-power-milliwatt = { $value } мВт
+    .label = Мощность
+# This is used in the tooltip when the instant power value uses the microwatt unit.
+# Variables:
+#   $value (String) - the power value at this location
+TrackPower--tooltip-power-microwatt = { $value } мВт
     .label = Мощность
 # This is used in the tooltip when the power value uses the kilowatt unit.
 # Variables:
@@ -1027,6 +1081,12 @@ TransformNavigator--focus-subtree = Узел фокусировки: { $item }
 # Variables:
 #   $item (String) - Name of the function that transform applied to.
 TransformNavigator--focus-function = Фокус: { $item }
+# "Focus self" transform.
+# See: https://profiler.firefox.com/docs/#/./guide-filtering-call-trees?id=focus-on-function-self
+# Also see the translation note above CallNodeContextMenu--transform-focus-self.
+# Variables:
+#   $item (String) - Name of the function that transform applied to.
+TransformNavigator--focus-self = Сфокусироваться на себе: { $item }
 # "Focus category" transform. The word "Focus" has the meaning of an adjective here.
 # See: https://profiler.firefox.com/docs/#/./guide-filtering-call-trees?id=focus-category
 # Variables:
@@ -1172,6 +1232,17 @@ AssemblyView--show-button =
 # Assembly refers to the low-level programming language.
 AssemblyView--hide-button =
     .title = Скрыть вид сборки
+# The "◀" button above the assembly view.
+AssemblyView--prev-button =
+    .title = Предыдущее
+# The "▶" button above the assembly view.
+AssemblyView--next-button =
+    .title = Далее
+# The label showing the current position and total count above the assembly view.
+# Variables:
+#   $current (Number) - The current position (1-indexed).
+#   $total (Number) - The total count.
+AssemblyView--position-label = { $current } из { $total }
 
 ## UploadedRecordingsHome
 ## This is the page that displays all the profiles that user has uploaded.

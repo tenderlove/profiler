@@ -84,15 +84,24 @@ function simulateSymbolStoreHasNoCache() {
   (SymbolStoreDB as any).mockImplementation(() => ({
     getSymbolTable: jest
       .fn()
-      .mockImplementation((debugName, breakpadId) =>
-        Promise.reject(
-          new SymbolsNotFoundError(
-            'The requested library does not exist in the database.',
-            { debugName, breakpadId }
-          )
-        )
-      ),
+      .mockImplementation((_debugName, _breakpadId) => Promise.resolve(null)),
   }));
+}
+
+// Returns an ArrayBuffer which contains only the bytes that
+// are covered by the Uint8Array, making a copy if needed.
+function extractArrayBuffer(bufferView: Uint8Array<ArrayBuffer>): ArrayBuffer {
+  if (
+    bufferView.byteOffset === 0 &&
+    bufferView.byteLength === bufferView.buffer.byteLength
+  ) {
+    return bufferView.buffer;
+  }
+
+  // There was extra data at the start or at the end. Make a copy.
+  const copy = new Uint8Array(bufferView.byteLength);
+  copy.set(bufferView);
+  return copy.buffer;
 }
 
 describe('actions/receive-profile', function () {
@@ -181,9 +190,6 @@ describe('actions/receive-profile', function () {
 
       workThread.name = 'Work Thread';
       idleThread.name = 'Idle Thread';
-      idleThread.frameTable.category = idleThread.frameTable.category.map(
-        () => idleCategoryIndex
-      );
       return { profile, idleThread, workThread };
     }
 
@@ -683,10 +689,11 @@ describe('actions/receive-profile', function () {
           case 'json':
             return profileJSON;
           case 'arraybuffer':
-            return toUint8Array(profileJSON).buffer as ArrayBuffer;
+            return extractArrayBuffer(toUint8Array(profileJSON));
           case 'gzip':
-            return (await compress(toUint8Array(profileJSON)))
-              .buffer as ArrayBuffer;
+            return extractArrayBuffer(
+              await compress(toUint8Array(profileJSON))
+            );
           default:
             throw new Error('unknown profiler format');
         }
@@ -781,7 +788,6 @@ describe('actions/receive-profile', function () {
           const browserConnectionStatus =
             await createBrowserConnection('Firefox/123.0');
           await dispatch(retrieveProfileFromBrowser(browserConnectionStatus));
-          expect(console.warn).toHaveBeenCalledTimes(2);
 
           const state = getState();
           expect(getView(state)).toEqual({ phase: 'DATA_LOADED' });
@@ -1322,7 +1328,7 @@ describe('actions/receive-profile', function () {
         const profileOrZip = await _fetchProfile(args);
         expect(profileOrZip).toEqual({
           responseType: 'PROFILE',
-          profile: profile.buffer,
+          profile: extractArrayBuffer(profile),
         });
       } catch (error) {
         userFacingError = error;
@@ -1454,7 +1460,7 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: '',
-        payload: (await compress(serializeProfile(profile))).buffer,
+        payload: extractArrayBuffer(await compress(serializeProfile(profile))),
       });
       expect(view.phase).toBe('DATA_LOADED');
       expect(ProfileViewSelectors.getProfile(getState()).meta.product).toEqual(
@@ -1486,7 +1492,7 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: 'application/gzip',
-        payload: (await compress(serializeProfile(profile))).buffer,
+        payload: extractArrayBuffer(await compress(serializeProfile(profile))),
       });
       expect(view.phase).toBe('DATA_LOADED');
       expect(ProfileViewSelectors.getProfile(getState()).meta.product).toEqual(
@@ -1500,7 +1506,7 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: 'application/json',
-        payload: (await compress(serializeProfile(profile))).buffer,
+        payload: extractArrayBuffer(await compress(serializeProfile(profile))),
       });
       expect(view.phase).toBe('DATA_LOADED');
       expect(ProfileViewSelectors.getProfile(getState()).meta.product).toEqual(
@@ -1514,7 +1520,7 @@ describe('actions/receive-profile', function () {
         .mockImplementation(() => {});
       const { view } = await setupTestWithFile({
         type: 'application/gzip',
-        payload: (await compress('{}')).buffer,
+        payload: extractArrayBuffer(await compress('{}')),
       });
       expect(view.phase).toBe('FATAL_ERROR');
 
@@ -1533,14 +1539,9 @@ describe('actions/receive-profile', function () {
       zip.file(fileName, serializedProfile);
       const array = await zip.generateAsync({ type: 'uint8array' });
 
-      // Create a new ArrayBuffer instance and copy the data into it, in order
-      // to work around https://github.com/facebook/jest/issues/6248
-      const bufferCopy = new ArrayBuffer(array.buffer.byteLength);
-      new Uint8Array(bufferCopy).set(new Uint8Array(array.buffer));
-
       return setupTestWithFile({
         type: 'application/zip',
-        payload: bufferCopy,
+        payload: extractArrayBuffer(array as Uint8Array<ArrayBuffer>),
       });
     }
 
@@ -1890,14 +1891,14 @@ describe('actions/receive-profile', function () {
 
     it('reuses transforms', async function () {
       const { getState } = await setupWithLongUrl(getSomeProfiles(), {
-        urlSearch1: 'thread=0&transforms=ff-42',
+        urlSearch1: 'thread=0&transforms=ff-3',
         urlSearch2: 'thread=1',
       });
 
       expect(UrlStateSelectors.getTransformStack(getState(), 0)).toEqual([
         {
           type: 'focus-function',
-          funcIndex: 42,
+          funcIndex: 3,
         },
       ]);
     });

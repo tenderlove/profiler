@@ -1,7 +1,17 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-import { GREY_20, GREY_30, BLUE_60, BLUE_80 } from 'photon-colors';
+import {
+  GREY_20,
+  GREY_30,
+  GREY_60,
+  GREY_90,
+  BLUE_60,
+  BLUE_80,
+  GREY_70,
+} from 'photon-colors';
+import { getForegroundColor, getBackgroundColor } from '../../utils/colors';
+import { isDarkMode, lightDark } from '../../utils/dark-mode';
 import * as React from 'react';
 import {
   withChartViewport,
@@ -49,7 +59,7 @@ import {
   isValidGraphColor,
 } from 'firefox-profiler/profile-logic/graph-color';
 import { getSchemaFromMarker } from 'firefox-profiler/profile-logic/marker-schema';
-import { getBottomBoxInfoForStackFrame } from 'firefox-profiler/profile-logic/profile-data';
+import { getBottomBoxInfoForStackFrame } from 'firefox-profiler/profile-logic/bottom-box';
 
 import type {
   ChartCanvasScale,
@@ -103,8 +113,82 @@ const LABEL_PADDING = 5;
 const MARKER_BORDER_COLOR = '#2c77d1';
 const DEFAULT_FILL_COLOR = '#8ac4ff'; // Light blue for non-highlighted
 
+function getSeparatorColor() {
+  return lightDark(GREY_20, GREY_70);
+}
+
+function getBucketBackgroundColor() {
+  return lightDark(GREY_20, GREY_70);
+}
+
+function getBucketBorderColor() {
+  return lightDark(GREY_30, GREY_60);
+}
+
+function getHighlightRowBackgroundColor() {
+  return 'rgba(40, 122, 169, 0.2)';
+}
+
+function getDefaultMarkerColors(isHighlighted: boolean) {
+  if (isDarkMode()) {
+    return {
+      fillColor: isHighlighted ? 'hsl(208, 81%, 52%)' : 'hsl(208, 88%, 32%)',
+      strokeColor: isHighlighted ? 'hsl(208, 82%, 58%)' : 'hsl(208, 71%, 40%)',
+      textColor: isHighlighted ? GREY_90 : GREY_20,
+    };
+  }
+  return {
+    fillColor: isHighlighted ? BLUE_60 : DEFAULT_FILL_COLOR,
+    strokeColor: isHighlighted ? BLUE_80 : MARKER_BORDER_COLOR,
+    textColor: isHighlighted ? 'white' : 'black', // White text on dark blue, black text on light blue
+  };
+}
+
 class MarkerChartCanvasImpl extends React.PureComponent<Props> {
   _textMeasurement: TextMeasurement | null = null;
+
+  override componentDidUpdate(prevProps: Props) {
+    const viewportDidMount =
+      !prevProps.viewport.isSizeSet && this.props.viewport.isSizeSet;
+    const viewportResized =
+      this.props.viewport.isSizeSet &&
+      this.props.viewport.containerHeight !==
+        prevProps.viewport.containerHeight;
+    const selectedMarkerChanged =
+      this.props.selectedMarkerIndex !== prevProps.selectedMarkerIndex;
+
+    if (viewportDidMount || viewportResized || selectedMarkerChanged) {
+      this._scrollSelectionIntoView();
+    }
+  }
+
+  _scrollSelectionIntoView = () => {
+    const { selectedMarkerIndex, markerTimingAndBuckets, rowHeight, viewport } =
+      this.props;
+
+    if (selectedMarkerIndex === null) {
+      return;
+    }
+
+    const markerIndexToTimingRow = this._getMarkerIndexToTimingRow(
+      markerTimingAndBuckets
+    );
+    const rowIndex = markerIndexToTimingRow[selectedMarkerIndex];
+
+    if (rowIndex === undefined) {
+      return;
+    }
+
+    const y: CssPixels = rowIndex * rowHeight;
+    const { viewportTop, viewportBottom } = viewport;
+
+    if (y < viewportTop || y + rowHeight > viewportBottom) {
+      // Scroll the marker to the vertical center of the viewport.
+      const viewportHeight = viewportBottom - viewportTop;
+      const targetViewportTop = y + rowHeight / 2 - viewportHeight / 2;
+      viewport.moveViewport(0, viewportTop - targetViewportTop);
+    }
+  };
 
   /**
    * Get the fill, stroke, and text colors for a marker based on its schema and data.
@@ -152,15 +236,11 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
       return {
         fillColor: getFillColor(color),
         strokeColor: getStrokeColor(color),
-        textColor: '#000', // Always use black text for unselected markers
+        textColor: getForegroundColor(), // Always use black/white text for unselected markers
       };
     }
     // Fall back to default blue colors
-    return {
-      fillColor: isHighlighted ? BLUE_60 : DEFAULT_FILL_COLOR,
-      strokeColor: isHighlighted ? BLUE_80 : MARKER_BORDER_COLOR,
-      textColor: isHighlighted ? 'white' : 'black', // White text on dark blue, black text on light blue
-    };
+    return getDefaultMarkerColors(isHighlighted);
   }
 
   drawCanvas = (
@@ -235,7 +315,7 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
         this.drawSeparatorsAndLabels(ctx, oldRow, oldRow + 1);
       }
     } else {
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = getBackgroundColor();
       ctx.fillRect(0, 0, containerWidth, containerHeight);
       if (rightClickedRow !== undefined) {
         this.highlightRow(ctx, rightClickedRow);
@@ -253,7 +333,7 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
       viewport: { viewportTop, containerWidth },
     } = this.props;
 
-    ctx.fillStyle = 'rgba(40, 122, 169, 0.2)';
+    ctx.fillStyle = getHighlightRowBackgroundColor();
     ctx.fillRect(
       0, // To include the labels also
       row * rowHeight - viewportTop,
@@ -559,7 +639,7 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
       viewport: { viewportTop, containerWidth },
     } = this.props;
 
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = getBackgroundColor();
     ctx.fillRect(
       0,
       rowIndex * rowHeight - viewportTop,
@@ -648,7 +728,7 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
     const usefulContainerWidth = containerWidth - marginRight;
 
     // Draw separators
-    ctx.fillStyle = GREY_20;
+    ctx.fillStyle = getSeparatorColor();
     ctx.fillRect(marginLeft - 1, 0, 1, containerHeight);
     for (let rowIndex = startRow; rowIndex < endRow; rowIndex++) {
       // `- 1` at the end, because the top separator is not drawn in the canvas,
@@ -660,7 +740,7 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
     const textMeasurement = this._getTextMeasurement(ctx);
 
     // Draw the marker names in the left margin.
-    ctx.fillStyle = '#000000';
+    ctx.fillStyle = getForegroundColor();
     for (let rowIndex = startRow; rowIndex < endRow; rowIndex++) {
       const markerTiming = markerTimingAndBuckets[rowIndex];
       if (typeof markerTiming === 'string') {
@@ -703,16 +783,16 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
       const y = rowIndex * rowHeight - viewportTop;
 
       // Draw the backgound.
-      ctx.fillStyle = GREY_20;
+      ctx.fillStyle = getBucketBackgroundColor();
       ctx.fillRect(0, y - 1, usefulContainerWidth, rowHeight);
 
       // Draw the borders./*
-      ctx.fillStyle = GREY_30;
+      ctx.fillStyle = getBucketBorderColor();
       ctx.fillRect(0, y - 1, usefulContainerWidth, 1);
       ctx.fillRect(0, y + rowHeight - 1, usefulContainerWidth, 1);
 
       // Draw the text.
-      ctx.fillStyle = '#000000';
+      ctx.fillStyle = getForegroundColor();
       ctx.fillText(bucketName, LABEL_PADDING + marginLeft, y + TEXT_OFFSET_TOP);
     }
   }
@@ -920,8 +1000,100 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
     );
   };
 
+  /**
+   * Compute canvas-relative tooltip offset for the selected marker.
+   * Returns null if the marker can't be located in the timing data or
+   * is outside the visible viewport.
+   */
+  _getSelectedItemTooltipOffset(): {
+    offsetX: CssPixels;
+    offsetY: CssPixels;
+  } | null {
+    const { selectedMarkerIndex } = this.props;
+    if (selectedMarkerIndex === null) {
+      return null;
+    }
+
+    const {
+      rangeStart,
+      rangeEnd,
+      markerTimingAndBuckets,
+      rowHeight,
+      marginLeft,
+      marginRight,
+      viewport: {
+        containerWidth,
+        containerHeight,
+        viewportLeft,
+        viewportRight,
+        viewportTop,
+      },
+    } = this.props;
+
+    // Step 1: Find which row this marker is displayed in
+    const markerIndexToTimingRow = this._getMarkerIndexToTimingRow(
+      markerTimingAndBuckets
+    );
+    const rowIndex = markerIndexToTimingRow[selectedMarkerIndex];
+
+    // Step 2: Get the timing data for all markers in this row
+    const markerTiming = markerTimingAndBuckets[rowIndex];
+    if (!markerTiming || typeof markerTiming === 'string') {
+      // Row is empty or is a bucket label (string), not actual marker data
+      return null;
+    }
+
+    // Step 3: Find the position of our specific marker within this row's data
+    let markerTimingIndex = -1;
+    for (let i = 0; i < markerTiming.length; i++) {
+      if (markerTiming.index[i] === selectedMarkerIndex) {
+        markerTimingIndex = i;
+        break;
+      }
+    }
+
+    if (markerTimingIndex === -1) {
+      return null;
+    }
+
+    // Step 4: Calculate horizontal (X) position
+    const startTimestamp = markerTiming.start[markerTimingIndex];
+    const endTimestamp = markerTiming.end[markerTimingIndex];
+
+    const markerContainerWidth = containerWidth - marginLeft - marginRight;
+    const rangeLength: Milliseconds = rangeEnd - rangeStart;
+    const viewportLength: UnitIntervalOfProfileRange =
+      viewportRight - viewportLeft;
+    const startTime: UnitIntervalOfProfileRange =
+      (startTimestamp - rangeStart) / rangeLength;
+    const endTime: UnitIntervalOfProfileRange =
+      (endTimestamp - rangeStart) / rangeLength;
+
+    const x: CssPixels =
+      ((startTime - viewportLeft) * markerContainerWidth) / viewportLength +
+      marginLeft;
+    const w: CssPixels =
+      ((endTime - startTime) * markerContainerWidth) / viewportLength;
+
+    // For instant markers (start === end), use the center point.
+    // For interval markers, use a point 1/3 into the marker (or 30px, whichever is smaller).
+    const isInstantMarker = startTimestamp === endTimestamp;
+    const offsetX = isInstantMarker ? x : x + Math.min(w / 3, 30);
+
+    // Step 5: Calculate vertical (Y) position
+    // + 5 offsets the tooltip slightly below the row's top edge.
+    const offsetY: CssPixels = rowIndex * rowHeight - viewportTop + 5;
+
+    if (offsetY < 0 || offsetY > containerHeight) {
+      return null;
+    }
+
+    return { offsetX, offsetY };
+  }
+
   override render() {
     const { containerWidth, containerHeight, isDragging } = this.props.viewport;
+    const { selectedMarkerIndex } = this.props;
 
     return (
       <ChartCanvas
@@ -939,6 +1111,8 @@ class MarkerChartCanvasImpl extends React.PureComponent<Props> {
         onMouseMove={this.onMouseMove}
         onMouseLeave={this.onMouseLeave}
         stickyTooltips={true}
+        selectedItem={selectedMarkerIndex}
+        selectedItemTooltipOffset={this._getSelectedItemTooltipOffset()}
       />
     );
   }

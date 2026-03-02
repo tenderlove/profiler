@@ -10,7 +10,10 @@ import {
   processGeckoProfile,
   unserializeProfileOfArbitraryFormat,
 } from 'firefox-profiler/profile-logic/process-profile';
-import { SymbolStore } from 'firefox-profiler/profile-logic/symbol-store';
+import {
+  readSymbolsFromSymbolTable,
+  SymbolStore,
+} from 'firefox-profiler/profile-logic/symbol-store';
 import {
   symbolicateProfile,
   applySymbolicationSteps,
@@ -84,17 +87,22 @@ import type {
   MixedObject,
 } from 'firefox-profiler/types';
 
-import type {
-  FuncToFuncsMap,
-  SymbolicationStepInfo,
-} from '../profile-logic/symbolication';
+import type { SymbolicationStepInfo } from '../profile-logic/symbolication';
 import { assertExhaustiveCheck } from '../utils/types';
 import { bytesToBase64DataUrl } from 'firefox-profiler/utils/base64';
 import type {
   BrowserConnection,
   BrowserConnectionStatus,
 } from '../app-logic/browser-connection';
-import type { LibSymbolicationRequest } from '../profile-logic/symbol-store';
+import type {
+  AddressResult,
+  LibSymbolicationRequest,
+  LibSymbolicationResponse,
+  SymbolProvider,
+} from '../profile-logic/symbol-store';
+import type { SymbolTableAsTuple } from 'firefox-profiler/profile-logic/symbol-store-db';
+import SymbolStoreDB from 'firefox-profiler/profile-logic/symbol-store-db';
+import type { ProfileUpgradeInfo } from 'firefox-profiler/profile-logic/processed-profile-versioning';
 
 /**
  * This file collects all the actions that are used for receiving the profile in the
@@ -337,7 +345,7 @@ export function finalizeFullProfileView(
         const thread = profile.threads[threadIndex];
         const { samples, jsAllocations, nativeAllocations } = thread;
         hasSamples = [samples, jsAllocations, nativeAllocations].some((table) =>
-          hasUsefulSamples(table?.stack, thread, profile.shared)
+          hasUsefulSamples(table?.stack, profile.shared)
         );
         if (hasSamples) {
           break;
@@ -446,28 +454,20 @@ export function doneSymbolicating(): Action {
 // reach the screen because it would be invalidated by the next symbolication update.
 // So we queue up symbolication steps and run the update from requestIdleCallback.
 export function bulkProcessSymbolicationSteps(
-  symbolicationStepsPerThread: Map<ThreadIndex, SymbolicationStepInfo[]>
+  symbolicationSteps: SymbolicationStepInfo[]
 ): ThunkAction<void> {
   return (dispatch, getState) => {
     const { threads, shared } = getProfile(getState());
-    const oldFuncToNewFuncsMaps: Map<ThreadIndex, FuncToFuncsMap> = new Map();
-    const symbolicatedThreads = threads.map((oldThread, threadIndex) => {
-      const symbolicationSteps = symbolicationStepsPerThread.get(threadIndex);
-      if (symbolicationSteps === undefined) {
-        return oldThread;
-      }
-      const { thread, oldFuncToNewFuncsMap } = applySymbolicationSteps(
-        oldThread,
-        shared,
-        symbolicationSteps
-      );
-      oldFuncToNewFuncsMaps.set(threadIndex, oldFuncToNewFuncsMap);
-      return thread;
-    });
+    const {
+      threads: symbolicatedThreads,
+      shared: symbolicatedShared,
+      oldFuncToNewFuncsMap,
+    } = applySymbolicationSteps(threads, shared, symbolicationSteps);
     dispatch({
       type: 'BULK_SYMBOLICATION',
-      oldFuncToNewFuncsMaps,
+      oldFuncToNewFuncsMap,
       symbolicatedThreads,
+      symbolicatedShared,
     });
   };
 }
@@ -489,12 +489,12 @@ if (typeof window === 'object' && window.requestIdleCallback) {
 // Queues up symbolication steps and bulk-processes them from requestIdleCallback,
 // in order to improve UI responsiveness during symbolication.
 class SymbolicationStepQueue {
-  _updates: Map<ThreadIndex, SymbolicationStepInfo[]>;
+  _updates: SymbolicationStepInfo[];
   _updateObservers: Array<() => void>;
   _requestedUpdate: boolean;
 
   constructor() {
-    this._updates = new Map();
+    this._updates = [];
     this._updateObservers = [];
     this._requestedUpdate = false;
   }
@@ -512,7 +512,7 @@ class SymbolicationStepQueue {
   _dispatchUpdate(dispatch: Dispatch) {
     const updates = this._updates;
     const observers = this._updateObservers;
-    this._updates = new Map();
+    this._updates = [];
     this._updateObservers = [];
     this._requestedUpdate = false;
 
@@ -525,17 +525,11 @@ class SymbolicationStepQueue {
 
   enqueueSingleSymbolicationStep(
     dispatch: Dispatch,
-    threadIndex: ThreadIndex,
     symbolicationStepInfo: SymbolicationStepInfo,
     completionHandler: () => void
   ) {
     this._scheduleUpdate(dispatch);
-    let threadSteps = this._updates.get(threadIndex);
-    if (threadSteps === undefined) {
-      threadSteps = [];
-      this._updates.set(threadIndex, threadSteps);
-    }
-    threadSteps.push(symbolicationStepInfo);
+    this._updates.push(symbolicationStepInfo);
     this._updateObservers.push(completionHandler);
   }
 }
@@ -569,13 +563,50 @@ function getSymbolStore(
     return null;
   }
 
-  async function requestSymbolsWithCallback(
+  // Note, the database name still references the old project name, "perf.html". It was
+  // left the same as to not invalidate user's information.
+  const symbolProvider = new RegularSymbolProvider(
+    'perf-html-async-storage',
+    dispatch,
+    symbolServerUrl,
+    browserConnection
+  );
+  return new SymbolStore(symbolProvider);
+}
+
+type DemangleFunction = (name: string) => string;
+
+/**
+ * The regular implementation of the SymbolProvider interface: Symbols are requested
+ * from a server via fetch, and from the browser via a BrowserConnection (if present).
+ * State changes are notified via redux actions to the provided `dispatch` function.
+ */
+class RegularSymbolProvider implements SymbolProvider {
+  _dispatch: Dispatch;
+  _symbolServerUrl: string;
+  _browserConnection: BrowserConnection | null;
+  _symbolDb: SymbolStoreDB;
+  _demangleCallback: DemangleFunction | null = null;
+
+  constructor(
+    dbNamePrefix: string,
+    dispatch: Dispatch,
+    symbolServerUrl: string,
+    browserConnection: BrowserConnection | null
+  ) {
+    this._dispatch = dispatch;
+    this._symbolServerUrl = symbolServerUrl;
+    this._browserConnection = browserConnection;
+    this._symbolDb = new SymbolStoreDB(`${dbNamePrefix}-symbol-tables`);
+  }
+
+  async _makeSymbolicationAPIRequestWithCallback(
     symbolSupplierName: string,
     requests: LibSymbolicationRequest[],
     callback: (path: string, requestJson: string) => Promise<unknown>
   ) {
     for (const { lib } of requests) {
-      dispatch(requestingSymbolTable(lib));
+      this._dispatch(requestingSymbolTable(lib));
     }
     try {
       return await MozillaSymbolicationAPI.requestSymbols(
@@ -589,73 +620,159 @@ function getSymbolStore(
       );
     } finally {
       for (const { lib } of requests) {
-        dispatch(receivedSymbolTableReply(lib));
+        this._dispatch(receivedSymbolTableReply(lib));
       }
     }
   }
 
-  // Note, the database name still references the old project name, "perf.html". It was
-  // left the same as to not invalidate user's information.
-  const symbolStore = new SymbolStore('perf-html-async-storage', {
-    requestSymbolsFromServer: (requests) =>
-      requestSymbolsWithCallback(
-        'symbol server',
-        requests,
-        async (path, json) => {
-          const response = await fetch(symbolServerUrl + path, {
-            body: json,
-            method: 'POST',
-            mode: 'cors',
-            // Use a profiler-specific user agent, so that the symbolication server knows
-            // what's making this request.
-            headers: new Headers({
-              'User-Agent': `FirefoxProfiler/1.0 (+${location.origin})`,
-            }),
-          });
-          return response.json();
-        }
-      ),
-
-    requestSymbolsFromBrowser: async (requests) => {
-      if (browserConnection === null) {
-        throw new Error(
-          'No connection to the browser, cannot run querySymbolicationApi'
-        );
+  requestSymbolsFromServer(
+    requests: LibSymbolicationRequest[]
+  ): Promise<LibSymbolicationResponse[]> {
+    return this._makeSymbolicationAPIRequestWithCallback(
+      'symbol server',
+      requests,
+      async (path, json) => {
+        const response = await fetch(this._symbolServerUrl + path, {
+          body: json,
+          method: 'POST',
+          mode: 'cors',
+          // Use a profiler-specific user agent, so that the symbolication server knows
+          // what's making this request.
+          headers: new Headers({
+            'User-Agent': `FirefoxProfiler/1.0 (+${location.origin})`,
+          }),
+        });
+        return response.json();
       }
+    );
+  }
 
-      const bc = browserConnection;
-      return requestSymbolsWithCallback(
-        'browser',
-        requests,
-        async (path, json) =>
-          JSON.parse(await bc.querySymbolicationApi(path, json))
+  async requestSymbolsFromBrowser(
+    requests: LibSymbolicationRequest[]
+  ): Promise<LibSymbolicationResponse[]> {
+    if (this._browserConnection === null) {
+      throw new Error(
+        'No connection to the browser, cannot run querySymbolicationApi'
       );
-    },
+    }
 
-    requestSymbolTableFromBrowser: async (lib) => {
-      if (browserConnection === null) {
-        throw new Error(
-          'No connection to the browser, cannot obtain symbol tables'
-        );
-      }
+    const bc = this._browserConnection;
+    return this._makeSymbolicationAPIRequestWithCallback(
+      'browser',
+      requests,
+      async (path, json) =>
+        JSON.parse(await bc.querySymbolicationApi(path, json))
+    );
+  }
 
-      const { debugName, breakpadId } = lib;
-      dispatch(requestingSymbolTable(lib));
-      try {
-        const symbolTable = await browserConnection.getSymbolTable(
-          debugName,
-          breakpadId
-        );
-        dispatch(receivedSymbolTableReply(lib));
-        return symbolTable;
-      } catch (error) {
-        dispatch(receivedSymbolTableReply(lib));
-        throw error;
-      }
-    },
-  });
+  /**
+   * This function returns a function that can demangle function name using a
+   * WebAssembly module, but falls back on the identity function if the
+   * WebAssembly module isn't available for some reason.
+   */
+  async _createDemangleCallback(): Promise<DemangleFunction> {
+    try {
+      // When this module imports some WebAssembly module, the bundler's mechanism
+      // invokes the WebAssembly object which might be absent in some browsers,
+      // therefore `import` can throw. Also some browsers might refuse to load a
+      // wasm module because of our CSP.
+      const { demangle_any } = await import('gecko-profiler-demangle');
+      return demangle_any;
+    } catch (error) {
+      // Module loading can fail (for example in browsers without WebAssembly
+      // support, or due to bad server configuration), so we will fall back
+      // to a pass-through function if that happens.
+      console.error('Demangling module could not be imported.', error);
+      return (mangledString) => mangledString;
+    }
+  }
 
-  return symbolStore;
+  async _getDemangleCallback(): Promise<DemangleFunction> {
+    return (this._demangleCallback ??= await this._createDemangleCallback());
+  }
+
+  // Try to get individual symbol tables from the browser, for any libraries
+  // which couldn't be symbolicated with the symbolication API.
+  // This is needed for two cases:
+  //  1. Firefox 95 and earlier, which didn't have a querySymbolicationApi
+  //     WebChannel access point, and only supports symbol tables.
+  //  2. Android system libraries, even in modern versions of Firefox. We don't
+  //     support querySymbolicationApi for them yet, see
+  //     https://bugzilla.mozilla.org/show_bug.cgi?id=1735897
+  async requestSymbolsViaSymbolTableFromBrowser(
+    request: LibSymbolicationRequest,
+    ignoreCache: boolean
+  ): Promise<Map<number, AddressResult>> {
+    // Check this._symbolDb first, and then call this._getSymbolTablesFromBrowser
+    // if we couldn't find the table in the cache.
+
+    // We also need a demangling function for this, which is in an async module.
+    const demangleCallback = await this._getDemangleCallback();
+
+    const { lib, addresses } = request;
+    const { debugName, breakpadId } = lib;
+    let symbolTable = null;
+
+    if (!ignoreCache) {
+      // Try to get the symbol table from the database.
+      // This call will return null if the symbol table is not present.
+      symbolTable = await this._symbolDb.getSymbolTable(debugName, breakpadId);
+    }
+
+    if (symbolTable === null) {
+      symbolTable = await this._requestSymbolTableFromBrowser(lib);
+      this._storeSymbolTableInDB(lib, symbolTable);
+    }
+
+    return readSymbolsFromSymbolTable(addresses, symbolTable, demangleCallback);
+  }
+
+  async _requestSymbolTableFromBrowser(
+    lib: RequestedLib
+  ): Promise<SymbolTableAsTuple> {
+    if (this._browserConnection === null) {
+      throw new Error(
+        'No connection to the browser, cannot obtain symbol tables'
+      );
+    }
+
+    const { debugName, breakpadId } = lib;
+    this._dispatch(requestingSymbolTable(lib));
+    try {
+      const symbolTable = await this._browserConnection.getSymbolTable(
+        debugName,
+        breakpadId
+      );
+      this._dispatch(receivedSymbolTableReply(lib));
+      return symbolTable;
+    } catch (error) {
+      this._dispatch(receivedSymbolTableReply(lib));
+      throw error;
+    }
+  }
+
+  // Store a symbol table in the database. This is only used for symbol tables
+  // and not for partial symbol results. Symbol tables are obtained from the
+  // browser via the geckoProfiler object which is defined in a frame script:
+  // https://searchfox.org/mozilla-central/rev/a9db89754fb507254cb8422e5a00af7c10d98264/devtools/client/performance-new/frame-script.js#67-81
+  //
+  // We do not store results from the Mozilla symbolication API, because those
+  // only contain the symbols we requested and not all the symbols of a given
+  // library.
+  async _storeSymbolTableInDB(
+    lib: RequestedLib,
+    symbolTable: SymbolTableAsTuple
+  ): Promise<void> {
+    const { debugName, breakpadId } = lib;
+    try {
+      await this._symbolDb.storeSymbolTable(debugName, breakpadId, symbolTable);
+    } catch (error) {
+      console.log(
+        `Failed to store the symbol table for ${debugName} in the database:`,
+        error
+      );
+    }
+  }
 }
 
 export async function doSymbolicateProfile(
@@ -671,15 +788,11 @@ export async function doSymbolicateProfile(
   await symbolicateProfile(
     profile,
     symbolStore,
-    (
-      threadIndex: ThreadIndex,
-      symbolicationStepInfo: SymbolicationStepInfo
-    ) => {
+    (symbolicationStepInfo: SymbolicationStepInfo) => {
       completionPromises.push(
         new Promise((resolve) => {
           _symbolicationStepQueueSingleton.enqueueSingleSymbolicationStep(
             dispatch,
-            threadIndex,
             symbolicationStepInfo,
             () => resolve(undefined)
           );
@@ -1045,7 +1158,7 @@ async function _extractZipFromResponse(
   // that comes from this realm.
   const typedBuffer = new Uint8Array(buffer);
   try {
-    const JSZip = await import('jszip');
+    const { default: JSZip } = await import('jszip');
     const zip = await JSZip.loadAsync(typedBuffer);
     // Catch the error if unable to load the zip.
     return zip;
@@ -1132,7 +1245,7 @@ export function getProfileUrlForHash(hash: string): string {
 export function retrieveProfileFromStore(
   hash: string,
   initialLoad: boolean = false
-): ThunkAction<Promise<void>> {
+): ThunkAction<Promise<ProfileUpgradeInfo>> {
   return retrieveProfileOrZipFromUrl(getProfileUrlForHash(hash), initialLoad);
 }
 
@@ -1144,7 +1257,7 @@ export function retrieveProfileFromStore(
 export function retrieveProfileOrZipFromUrl(
   profileUrl: string,
   initialLoad: boolean = false
-): ThunkAction<Promise<void>> {
+): ThunkAction<Promise<ProfileUpgradeInfo>> {
   return async function (dispatch) {
     dispatch(waitingForProfileFromUrl(profileUrl));
 
@@ -1159,21 +1272,23 @@ export function retrieveProfileOrZipFromUrl(
       switch (response.responseType) {
         case 'PROFILE': {
           const serializedProfile = response.profile;
+          const profileUpgradeInfo = {};
           const profile = await unserializeProfileOfArbitraryFormat(
             serializedProfile,
-            profileUrl
+            profileUrl,
+            profileUpgradeInfo
           );
           if (profile === undefined) {
             throw new Error('Unable to parse the profile.');
           }
 
           await dispatch(loadProfile(profile, {}, initialLoad));
-          break;
+          return profileUpgradeInfo;
         }
         case 'ZIP': {
           const zip = response.zip;
           await dispatch(receiveZipFile(zip));
-          break;
+          return {};
         }
         default:
           throw assertExhaustiveCheck(
@@ -1183,6 +1298,7 @@ export function retrieveProfileOrZipFromUrl(
       }
     } catch (error) {
       dispatch(fatalError(error));
+      return {};
     }
   };
 }
@@ -1236,7 +1352,7 @@ export function retrieveProfileFromFile(
       if (_deduceContentType(file.name, file.type) === 'application/zip') {
         // Open a zip file in the zip file viewer
         const buffer = await fileReader(file).asArrayBuffer();
-        const JSZip = await import('jszip');
+        const { default: JSZip } = await import('jszip');
         const zip = await JSZip.loadAsync(buffer);
         await dispatch(receiveZipFile(zip));
       } else {
@@ -1311,6 +1427,7 @@ export function retrieveProfilesToCompare(
           ) {
             url = await expandUrl(url);
           }
+          // TODO: Pass the profileUpgradeInfo here. See #5871.
           return stateFromLocation(new URL(url));
         })
       );
@@ -1382,14 +1499,20 @@ export function retrieveProfilesToCompare(
   };
 }
 
+export type ProfileAndProfileUpgradeInfo = {
+  profile: Profile;
+  upgradeInfo: ProfileUpgradeInfo;
+};
+
 // This function takes location(most probably `window.location`) as parameter
 // and loads the profile in that given location, then returns the profile data.
 // This function is being used to get the initial profile data before upgrading
 // the url and processing the UrlState.
+// `profileUpgradeInfo` is an outparam that will be popuplated by this function.
 export function retrieveProfileForRawUrl(
   location: Location,
   browserConnectionStatus?: BrowserConnectionStatus
-): ThunkAction<Promise<Profile | null>> {
+): ThunkAction<Promise<ProfileAndProfileUpgradeInfo | null>> {
   return async (dispatch, getState) => {
     const pathParts = location.pathname.split('/').filter((d) => d);
     let possibleDataSource = pathParts[0];
@@ -1408,8 +1531,10 @@ export function retrieveProfileForRawUrl(
     }
     dispatch(setDataSource(dataSource));
 
+    let profileUpgradeInfo = {};
+
     switch (dataSource) {
-      case 'from-browser':
+      case 'from-browser': {
         if (browserConnectionStatus === undefined) {
           throw new Error(
             'Error: all callers of this function should supply a browserConnectionStatus argument for from-browser'
@@ -1419,11 +1544,14 @@ export function retrieveProfileForRawUrl(
           retrieveProfileFromBrowser(browserConnectionStatus, true)
         );
         break;
+      }
       case 'public':
-        await dispatch(retrieveProfileFromStore(pathParts[1], true));
+        profileUpgradeInfo = await dispatch(
+          retrieveProfileFromStore(pathParts[1], true)
+        );
         break;
       case 'from-url':
-        await dispatch(
+        profileUpgradeInfo = await dispatch(
           retrieveProfileOrZipFromUrl(decodeURIComponent(pathParts[1]), true)
         );
         break;
@@ -1486,7 +1614,12 @@ export function retrieveProfileForRawUrl(
     }
 
     // Profile may be null if the response was a zip file.
-    return getProfileOrNull(getState());
+    const profileOrNull = getProfileOrNull(getState());
+    if (profileOrNull === null) {
+      return null;
+    }
+
+    return { profile: profileOrNull, upgradeInfo: profileUpgradeInfo };
   };
 }
 
@@ -1575,7 +1708,7 @@ export function changeTabFilter(tabID: TabID | null): ThunkAction<void> {
         const thread = profile.threads[threadIndex];
         const { samples, jsAllocations, nativeAllocations } = thread;
         hasSamples = [samples, jsAllocations, nativeAllocations].some((table) =>
-          hasUsefulSamples(table?.stack, thread, profile.shared)
+          hasUsefulSamples(table?.stack, profile.shared)
         );
         if (hasSamples) {
           break;
