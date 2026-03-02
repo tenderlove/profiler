@@ -1,7 +1,6 @@
 export async function tryLoadRubyHooks() {
     try {
-        const context = require.context('./', false, /ruby-custom-hooks\.js$/);
-        const hookModule = context('./ruby-custom-hooks.js');
+        const hookModule = await import('./ruby-custom-hooks.js');
 
         if (hookModule) {
           return {
