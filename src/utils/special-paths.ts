@@ -183,7 +183,7 @@ export function parseFileNameFromSymbolication(
     const { host, path } = localhostMatch.groups;
     return {
       type: 'localhost',
-      host: location.host + '/source',
+      host: host + '/source',
       path,
     };
   }
