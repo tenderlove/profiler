@@ -17,17 +17,36 @@ import {
   getDataSource,
   getProfileNameForStorage,
   getUrlPredictor,
+  getGlobalTrackOrder,
+  getHiddenGlobalTracks,
+  getHiddenLocalTracksByPid,
+  getLocalTrackOrderByPid,
+  getTabFilter,
 } from 'firefox-profiler/selectors/url-state';
 import {
   getProfile,
   getZeroAt,
   getCommittedRange,
+  getGlobalTracks,
+  getLocalTracksByPid,
 } from 'firefox-profiler/selectors/profile';
 import { viewProfile } from './receive-profile';
 import { ensureExists } from 'firefox-profiler/utils/types';
 import { extractProfileTokenFromJwt } from 'firefox-profiler/utils/jwt';
 import { withHistoryReplaceStateSync } from 'firefox-profiler/app-logic/url-handling';
 import { persistUploadedProfileInformationToDb } from 'firefox-profiler/app-logic/uploaded-profiles-db';
+import {
+  computeGlobalTracks,
+  computeLocalTracksByPid,
+  computeOldTrackIndexToNewTrackIndexMap,
+  computeHiddenTracksAfterSanitization,
+  computeTrackOrderAfterSanitization,
+} from 'firefox-profiler/profile-logic/tracks';
+import {
+  computeInnerWindowIDToTabMap,
+  computeOldCounterIndexToNew,
+  computeTabToThreadIndexesMap,
+} from 'firefox-profiler/profile-logic/profile-data';
 
 import type {
   Action,
@@ -36,28 +55,36 @@ import type {
   StartEndRange,
   State,
   Profile,
+  Pid,
+  TrackIndex,
   ProfileIndexTranslationMaps,
+  ProfileEncodingResult,
+  SharingMode,
 } from 'firefox-profiler/types';
 import { compress } from 'firefox-profiler/utils/gz';
-import { serializeProfile } from 'firefox-profiler/profile-logic/process-profile';
+import { serializeProfileToJsonString } from 'firefox-profiler/profile-logic/process-profile';
 
 export function updateSharingOption(
+  mode: SharingMode,
   slug: keyof CheckedSharingOptions,
   value: boolean
 ): Action {
   return {
     type: 'UPDATE_SHARING_OPTION',
+    mode,
     slug,
     value,
   };
 }
 
 export function sanitizedProfileEncodingStarted(
-  sanitizedProfile: Profile
+  sanitizedProfile: Profile,
+  encodingPromise: Promise<ProfileEncodingResult>
 ): Action {
   return {
     type: 'SANITIZED_PROFILE_ENCODING_STARTED',
     sanitizedProfile,
+    encodingPromise,
   };
 }
 
@@ -155,8 +182,10 @@ async function persistJustUploadedProfileInformationToDb(
   const urlPredictor = getUrlPredictor(prepublishedState);
   let predictedUrl;
 
-  const removeProfileInformation =
-    getRemoveProfileInformation(prepublishedState);
+  const removeProfileInformation = getRemoveProfileInformation(
+    prepublishedState,
+    'upload'
+  );
   if (removeProfileInformation) {
     // In case you wonder, committedRanges is either an empty array (if the
     // range was sanitized) or `null` (otherwise).
@@ -232,13 +261,6 @@ async function persistJustUploadedProfileInformationToDb(
   }
 }
 
-export type ProfileEncodingResult =
-  | {
-      type: 'SUCCESS';
-      profileData: Blob;
-    }
-  | { type: 'ERROR'; error: Error };
-
 function unwrapEncodedProfile(encodingResult: ProfileEncodingResult): Blob {
   if (encodingResult.type === 'ERROR') {
     throw encodingResult.error;
@@ -257,31 +279,33 @@ export type InflightProfileEncoding = {
  * - Serialize the profile to a buffer
  * - Kick off the asynchronous compression of the buffer
  *
- * The asynchronous compression can take a few seconds, so we want to kick
- * it off immediately when the profile publishing panel is opened. We also
- * want to be able to make use of the current in-flight compression if the
- * user clicks the upload button before compression is done. This is why
- * we return an `InflightProfileEncoding` object from this action; it contains
- * a promise which lets other parts of the publishing pipeline wait on the
- * compressed results.
+ * The asynchronous compression can take a few seconds, so we kick it off
+ * immediately when the download or share panel is opened. The in-flight
+ * compression is tracked in the redux state, so opening the other panel or
+ * pressing Upload reuses it (for the same sanitized profile) instead of
+ * compressing again. The returned promise lets the caller wait on the
+ * compressed result.
  *
  * This thunk action is synchronous.
  */
 export function encodeSanitizedProfile(
-  previousInflightEncoding?: InflightProfileEncoding
+  mode: SharingMode
 ): ThunkAction<InflightProfileEncoding> {
   return (dispatch, getState): InflightProfileEncoding => {
     const state = getState();
-    const sanitizedProfile = getSanitizedProfile(state).profile;
-
-    if (previousInflightEncoding?.sanitizedProfile === sanitizedProfile) {
-      // No need to kick of another compression. The current encoding may still
-      // be in-flight, and returning the original promise allows the caller to
-      // await it.
-      return previousInflightEncoding;
-    }
+    const sanitizedProfile = getSanitizedProfile(state, mode).profile;
 
     const encodingState = getSanitizedProfileEncodingState(state);
+    if (
+      encodingState.phase === 'ENCODING' &&
+      encodingState.sanitizedProfile === sanitizedProfile
+    ) {
+      // A compression for this profile is already in-flight; reuse it.
+      return {
+        sanitizedProfile,
+        encodingPromise: encodingState.encodingPromise,
+      };
+    }
     if (
       encodingState.phase === 'DONE' &&
       encodingState.sanitizedProfile === sanitizedProfile
@@ -299,9 +323,13 @@ export function encodeSanitizedProfile(
     // Kick off a new encoding for this profile. Don't await the promise,
     // just return it as part of the InflightProfileEncoding.
     const encodingPromise: Promise<ProfileEncodingResult> = (async function () {
+      // Yield so the ENCODING phase (dispatched below) is in the store before a
+      // synchronous failure here could dispatch FAILED, which the reducer drops.
+      await Promise.resolve();
       try {
-        dispatch(sanitizedProfileEncodingStarted(sanitizedProfile));
-        const gzipData = await compress(serializeProfile(sanitizedProfile));
+        const gzipData = await compress(
+          serializeProfileToJsonString(sanitizedProfile)
+        );
         const blob = new Blob([gzipData], { type: 'application/octet-binary' });
         dispatch(sanitizedProfileEncodingCompleted(sanitizedProfile, blob));
         return { type: 'SUCCESS', profileData: blob };
@@ -312,25 +340,24 @@ export function encodeSanitizedProfile(
       }
     })();
 
+    dispatch(
+      sanitizedProfileEncodingStarted(sanitizedProfile, encodingPromise)
+    );
     return { sanitizedProfile, encodingPromise };
   };
 }
 
 /**
- * This function starts the profile sharing process. Takes an optional argument that
- * indicates if the share attempt is being made for the second time. We have two share
- * buttons, one for sharing for the first time, and one for sharing after the initial
- * share depending on the previous URL share status. People can decide to remove the
- * URLs from the profile after sharing with URLs or they can decide to add the URLs after
- * sharing without them. We check the current state before attempting to share depending
- * on that flag.
+ * This function starts the profile sharing process.
+ *
+ * There are two share buttons: one for the first upload, and one to re-share
+ * afterwards, which lets people add or remove the profile's URLs between
+ * attempts.
  *
  * The return value is used for tests to determine if the request went all the way
  * through (true) or was quit early due to the generation value being invalidated (false).
  */
-export function attemptToPublish(
-  previousInflightEncoding?: InflightProfileEncoding
-): ThunkAction<Promise<boolean>> {
+export function attemptToPublish(): ThunkAction<Promise<boolean>> {
   return async (dispatch, getState) => {
     try {
       sendAnalytics({
@@ -363,10 +390,11 @@ export function attemptToPublish(
       };
       dispatch(uploadCompressionStarted(abortfunction));
 
-      const sanitizedInformation = getSanitizedProfile(prePublishedState);
-      const profileEncoding = dispatch(
-        encodeSanitizedProfile(previousInflightEncoding)
+      const sanitizedInformation = getSanitizedProfile(
+        prePublishedState,
+        'upload'
       );
+      const profileEncoding = dispatch(encodeSanitizedProfile('upload'));
       const encodingResult = await profileEncoding.encodingPromise;
 
       // The previous line was async, check to make sure that this request is still valid.
@@ -408,11 +436,111 @@ export function attemptToPublish(
         return false;
       }
 
-      const removeProfileInformation =
-        getRemoveProfileInformation(prePublishedState);
+      const removeProfileInformation = getRemoveProfileInformation(
+        prePublishedState,
+        'upload'
+      );
       if (removeProfileInformation) {
         const { committedRanges, translationMaps, profile } =
           sanitizedInformation;
+
+        // When sanitization re-indexed tracks, translate the URL state's
+        // track-index references through old → new track-index space so the
+        // user's choices for tracks that survived sanitization stay attached
+        // to the right tracks.
+        let remappedHiddenGlobalTracks: Set<TrackIndex> | null = null;
+        let remappedGlobalTrackOrder: TrackIndex[] | null = null;
+        let remappedHiddenLocalTracksByPid: Map<Pid, Set<TrackIndex>> | null =
+          null;
+        let remappedLocalTrackOrderByPid: Map<Pid, TrackIndex[]> | null = null;
+
+        const oldThreadIndexToNew = translationMaps?.oldThreadIndexToNew;
+        if (oldThreadIndexToNew) {
+          const oldProfile = getProfile(prePublishedState);
+          const oldCounterIndexToNew = computeOldCounterIndexToNew(
+            oldProfile.counters,
+            profile.counters,
+            oldThreadIndexToNew
+          );
+
+          // The selector-derived map keys ThreadIndex values from the
+          // prePublishedState; rebuild it against the sanitized profile.
+          const newTabToThreadIndexesMap = computeTabToThreadIndexesMap(
+            profile.threads,
+            computeInnerWindowIDToTabMap(profile.pages)
+          );
+          const tabFilter = getTabFilter(prePublishedState);
+          const newGlobalTracks = computeGlobalTracks(
+            profile,
+            tabFilter,
+            newTabToThreadIndexesMap
+          );
+          const newLocalTracksByPid = computeLocalTracksByPid(
+            profile,
+            newGlobalTracks
+          );
+
+          const oldGlobalTracks = getGlobalTracks(prePublishedState);
+          const oldLocalTracksByPid = getLocalTracksByPid(prePublishedState);
+
+          const oldStringToNewStringPlusOne =
+            translationMaps?.oldStringToNewStringPlusOne ?? null;
+
+          const globalOldToNew = computeOldTrackIndexToNewTrackIndexMap({
+            oldTracks: oldGlobalTracks,
+            newTracks: newGlobalTracks,
+            oldThreadIndexToNew,
+            oldCounterIndexToNew,
+            oldStringToNewStringPlusOne,
+          });
+
+          remappedHiddenGlobalTracks = computeHiddenTracksAfterSanitization({
+            oldHiddenTracks: getHiddenGlobalTracks(prePublishedState),
+            oldTrackIndexToNewTrackIndex: globalOldToNew,
+          });
+          remappedGlobalTrackOrder = computeTrackOrderAfterSanitization({
+            oldTrackOrder: getGlobalTrackOrder(prePublishedState),
+            oldTrackIndexToNewTrackIndex: globalOldToNew,
+          });
+
+          remappedHiddenLocalTracksByPid = new Map();
+          remappedLocalTrackOrderByPid = new Map();
+          const oldHiddenLocalByPid =
+            getHiddenLocalTracksByPid(prePublishedState);
+          const oldLocalOrderByPid = getLocalTrackOrderByPid(prePublishedState);
+
+          for (const [pid, newLocalTracks] of newLocalTracksByPid) {
+            const oldLocalTracks = oldLocalTracksByPid.get(pid) ?? [];
+            const localOldToNew = computeOldTrackIndexToNewTrackIndexMap({
+              oldTracks: oldLocalTracks,
+              newTracks: newLocalTracks,
+              oldThreadIndexToNew,
+              oldCounterIndexToNew,
+              oldStringToNewStringPlusOne,
+            });
+            const oldHiddenForPid = oldHiddenLocalByPid.get(pid);
+            if (oldHiddenForPid !== undefined) {
+              remappedHiddenLocalTracksByPid.set(
+                pid,
+                computeHiddenTracksAfterSanitization({
+                  oldHiddenTracks: oldHiddenForPid,
+                  oldTrackIndexToNewTrackIndex: localOldToNew,
+                })
+              );
+            }
+            const oldOrderForPid = oldLocalOrderByPid.get(pid);
+            if (oldOrderForPid !== undefined) {
+              remappedLocalTrackOrderByPid.set(
+                pid,
+                computeTrackOrderAfterSanitization({
+                  oldTrackOrder: oldOrderForPid,
+                  oldTrackIndexToNewTrackIndex: localOldToNew,
+                })
+              );
+            }
+          }
+        }
+
         // Hide the old UI gracefully.
         await dispatch(hideStaleProfile());
 
@@ -423,7 +551,11 @@ export function attemptToPublish(
             committedRanges,
             translationMaps,
             profileName,
-            prePublishedState
+            prePublishedState,
+            remappedHiddenGlobalTracks,
+            remappedGlobalTrackOrder,
+            remappedHiddenLocalTracksByPid,
+            remappedLocalTrackOrderByPid
           )
         );
 
@@ -504,13 +636,22 @@ export function resetUploadState(): Action {
 /**
  * Report to the UrlState that the profile was sanitized. This will re-map any stored
  * indexes or information that has been sanitized away.
+ *
+ * The four track-index payload fields carry URL state translated into the
+ * post-sanitization track-index space when sanitization re-indexed tracks
+ * (translationMaps.oldThreadIndexToNew is non-null). They are null when no
+ * remap is needed; in that case the existing reducer state is left untouched.
  */
 export function profileSanitized(
   hash: string,
   committedRanges: StartEndRange[] | null,
   translationMaps: ProfileIndexTranslationMaps | null,
   profileName: string,
-  prePublishedState: State | null
+  prePublishedState: State | null,
+  hiddenGlobalTracks: Set<TrackIndex> | null = null,
+  globalTrackOrder: TrackIndex[] | null = null,
+  hiddenLocalTracksByPid: Map<Pid, Set<TrackIndex>> | null = null,
+  localTrackOrderByPid: Map<Pid, TrackIndex[]> | null = null
 ): Action {
   return {
     type: 'SANITIZED_PROFILE_PUBLISHED',
@@ -519,6 +660,10 @@ export function profileSanitized(
     translationMaps,
     profileName,
     prePublishedState,
+    hiddenGlobalTracks,
+    globalTrackOrder,
+    hiddenLocalTracksByPid,
+    localTrackOrderByPid,
   };
 }
 

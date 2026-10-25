@@ -27,16 +27,16 @@ import {
   retrieveProfileOrZipFromUrl,
   retrieveProfileFromFile,
   retrieveProfilesToCompare,
-  _fetchProfile,
   retrieveProfileForRawUrl,
 } from '../../actions/receive-profile';
+import { fetchProfile as _fetchProfile } from '../../utils/profile-fetch';
 import { SymbolsNotFoundError } from '../../profile-logic/errors';
 
 import { createGeckoProfile } from '../fixtures/profiles/gecko-profile';
 import { blankStore, storeWithProfile } from '../fixtures/stores';
 import {
   processGeckoProfile,
-  serializeProfile,
+  serializeProfileToJsonString,
 } from '../../profile-logic/process-profile';
 import {
   getProfileFromTextSamples,
@@ -46,7 +46,7 @@ import {
   getProfileWithThreadCPUDelta,
 } from '../fixtures/profiles/processed-profile';
 import { getHumanReadableTracks } from '../fixtures/profiles/tracks';
-import { waitUntilState } from '../fixtures/utils';
+import { waitUntilState, extractArrayBuffer } from '../fixtures/utils';
 import { dataUrlToBytes } from 'firefox-profiler/utils/base64';
 
 import { compress } from '../../utils/gz';
@@ -86,22 +86,6 @@ function simulateSymbolStoreHasNoCache() {
       .fn()
       .mockImplementation((_debugName, _breakpadId) => Promise.resolve(null)),
   }));
-}
-
-// Returns an ArrayBuffer which contains only the bytes that
-// are covered by the Uint8Array, making a copy if needed.
-function extractArrayBuffer(bufferView: Uint8Array<ArrayBuffer>): ArrayBuffer {
-  if (
-    bufferView.byteOffset === 0 &&
-    bufferView.byteLength === bufferView.buffer.byteLength
-  ) {
-    return bufferView.buffer;
-  }
-
-  // There was extra data at the start or at the end. Make a copy.
-  const copy = new Uint8Array(bufferView.byteLength);
-  copy.set(bufferView);
-  return copy.buffer;
 }
 
 describe('actions/receive-profile', function () {
@@ -895,7 +879,10 @@ describe('actions/receive-profile', function () {
       const hash = 'c5e53f9ab6aecef926d4be68c84f2de550e2ac2f';
       const expectedUrl = `https://storage.googleapis.com/profile-store/${hash}`;
 
-      window.fetchMock.get(expectedUrl, _getSimpleProfile());
+      window.fetchMock.get(
+        expectedUrl,
+        serializeProfileToJsonString(_getSimpleProfile())
+      );
 
       const store = blankStore();
       await store.dispatch(retrieveProfileFromStore(hash));
@@ -955,7 +942,7 @@ describe('actions/receive-profile', function () {
       const expectedUrl = `https://storage.googleapis.com/profile-store/${hash}`;
       window.fetchMock
         .getOnce(expectedUrl, 403)
-        .get(expectedUrl, _getSimpleProfile());
+        .get(expectedUrl, serializeProfileToJsonString(_getSimpleProfile()));
 
       const store = blankStore();
       const views = (
@@ -1042,7 +1029,10 @@ describe('actions/receive-profile', function () {
 
     it('can retrieve a profile from the web and save it to state', async function () {
       const expectedUrl = 'https://profiles.club/shared.json';
-      window.fetchMock.get(expectedUrl, _getSimpleProfile());
+      window.fetchMock.get(
+        expectedUrl,
+        serializeProfileToJsonString(_getSimpleProfile())
+      );
 
       const store = blankStore();
       await store.dispatch(retrieveProfileOrZipFromUrl(expectedUrl));
@@ -1060,7 +1050,7 @@ describe('actions/receive-profile', function () {
       const expectedUrl = 'https://profiles.club/shared.json';
       window.fetchMock.get(
         expectedUrl,
-        compress(serializeProfile(_getSimpleProfile()))
+        compress(serializeProfileToJsonString(_getSimpleProfile()))
       );
       const store = blankStore();
       await store.dispatch(retrieveProfileOrZipFromUrl(expectedUrl));
@@ -1079,7 +1069,7 @@ describe('actions/receive-profile', function () {
       // The first call will still be a 403 -- remember, it's the default return value.
       window.fetchMock
         .getOnce(expectedUrl, 403)
-        .get(expectedUrl, _getSimpleProfile());
+        .get(expectedUrl, serializeProfileToJsonString(_getSimpleProfile()));
 
       const store = blankStore();
       const views = (
@@ -1150,193 +1140,6 @@ describe('actions/receive-profile', function () {
     });
   });
 
-  /**
-   * _fetchProfile is a helper function for the actions, but it is tested separately
-   * since it has a decent amount of complexity around different issues with loading
-   * in different support URL formats. It's mainly testing what happens when JSON
-   * and zip file is sent, and what happens when things fail.
-   */
-  describe('_fetchProfile', function () {
-    /**
-     * This helper function encapsulates various configurations for the type of content
-     * as well and response headers.
-     */
-    async function configureFetch(obj: {
-      url: string;
-      contentType?: string;
-      content: 'generated-zip' | 'generated-json' | Uint8Array;
-    }) {
-      const { url, contentType, content } = obj;
-      const stringProfile = serializeProfile(_getSimpleProfile());
-      const profile = JSON.parse(stringProfile);
-      let arrayBuffer;
-
-      switch (content) {
-        case 'generated-zip': {
-          const zip = new JSZip();
-          zip.file('profile.json', stringProfile);
-          arrayBuffer = await zip.generateAsync({ type: 'uint8array' });
-          break;
-        }
-        case 'generated-json':
-          arrayBuffer = encode(stringProfile);
-          break;
-        default:
-          arrayBuffer = content;
-          break;
-      }
-
-      window.fetchMock.catch(403).get(url, {
-        body: arrayBuffer,
-        headers: {
-          'content-type': contentType,
-        },
-      });
-
-      const reportError = jest.fn();
-      const args = {
-        url,
-        onTemporaryError: () => {},
-        reportError,
-      };
-
-      // Return fetch's args, based on the inputs.
-      return { profile, args, reportError };
-    }
-
-    it('fetches a normal profile with the correct content-type headers', async function () {
-      const { profile, args } = await configureFetch({
-        url: 'https://example.com/profile.json',
-        contentType: 'application/json',
-        content: 'generated-json',
-      });
-
-      const profileOrZip = await _fetchProfile(args);
-      expect(profileOrZip).toEqual({ responseType: 'PROFILE', profile });
-    });
-
-    it('fetches a zipped profile with correct content-type headers', async function () {
-      const { args, reportError } = await configureFetch({
-        url: 'https://example.com/profile.zip',
-        contentType: 'application/zip',
-        content: 'generated-zip',
-      });
-
-      const profileOrZip = await _fetchProfile(args);
-      expect(profileOrZip.responseType).toBe('ZIP');
-      expect(reportError.mock.calls.length).toBe(0);
-    });
-
-    it('fetches a zipped profile with incorrect content-type headers, but .zip extension', async function () {
-      const { args, reportError } = await configureFetch({
-        url: 'https://example.com/profile.zip',
-        content: 'generated-zip',
-      });
-
-      const profileOrZip = await _fetchProfile(args);
-      expect(profileOrZip.responseType).toBe('ZIP');
-      expect(reportError.mock.calls.length).toBe(0);
-    });
-
-    it('fetches a profile with incorrect content-type headers, but .json extension', async function () {
-      const { profile, args, reportError } = await configureFetch({
-        url: 'https://example.com/profile.json',
-        content: 'generated-json',
-      });
-
-      const profileOrZip = await _fetchProfile(args);
-      expect(profileOrZip).toEqual({ responseType: 'PROFILE', profile });
-      expect(reportError.mock.calls.length).toBe(0);
-    });
-
-    it('fetches a profile with incorrect content-type headers, no known extension, and attempts to JSON parse it it', async function () {
-      const { profile, args, reportError } = await configureFetch({
-        url: 'https://example.com/profile.file',
-        content: 'generated-json',
-      });
-
-      const profileOrZip = await _fetchProfile(args);
-      expect(profileOrZip).toEqual({ responseType: 'PROFILE', profile });
-      expect(reportError.mock.calls.length).toBe(0);
-    });
-
-    it('fails if a bad zip file is passed in', async function () {
-      const { args, reportError } = await configureFetch({
-        url: 'https://example.com/profile.file',
-        contentType: 'application/zip',
-        content: new Uint8Array([0, 1, 2, 3]),
-      });
-
-      let userFacingError;
-      try {
-        await _fetchProfile(args);
-      } catch (error) {
-        userFacingError = error;
-      }
-      expect(userFacingError).toMatchSnapshot();
-      expect(reportError.mock.calls.length).toBeGreaterThan(0);
-      expect(reportError.mock.calls).toMatchSnapshot();
-    });
-
-    it('fails if a bad profile JSON is passed in', async function () {
-      const invalidJSON = 'invalid';
-      const { args, reportError } = await configureFetch({
-        url: 'https://example.com/profile.json',
-        contentType: 'application/json',
-        content: encode(invalidJSON),
-      });
-
-      let userFacingError;
-      try {
-        await _fetchProfile(args);
-      } catch (error) {
-        userFacingError = error;
-      }
-      expect(userFacingError).toMatchSnapshot();
-      expect(reportError.mock.calls.length).toBeGreaterThan(0);
-      expect(reportError.mock.calls).toMatchSnapshot();
-    });
-
-    it('fails if a bad profile JSON is passed in, with no content type', async function () {
-      const invalidJSON = 'invalid';
-      const { args, reportError } = await configureFetch({
-        url: 'https://example.com/profile.json',
-        content: encode(invalidJSON),
-      });
-
-      let userFacingError;
-      try {
-        await _fetchProfile(args);
-      } catch (error) {
-        userFacingError = error;
-      }
-      expect(userFacingError).toMatchSnapshot();
-      expect(reportError.mock.calls.length).toBeGreaterThan(0);
-      expect(reportError.mock.calls).toMatchSnapshot();
-    });
-
-    it('fallback behavior if a completely unknown file is passed in', async function () {
-      const invalidJSON = 'invalid';
-      const profile = encode(invalidJSON);
-      const { args } = await configureFetch({
-        url: 'https://example.com/profile.unknown',
-        content: profile,
-      });
-
-      let userFacingError = null;
-      try {
-        const profileOrZip = await _fetchProfile(args);
-        expect(profileOrZip).toEqual({
-          responseType: 'PROFILE',
-          profile: extractArrayBuffer(profile),
-        });
-      } catch (error) {
-        userFacingError = error;
-      }
-      expect(userFacingError).toBeNull();
-    });
-  });
-
   describe('retrieveProfileFromFile', function () {
     /**
      * Bypass all of Flow's checks, and mock out the file interface.
@@ -1377,7 +1180,7 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: 'application/json',
-        payload: serializeProfile(profile),
+        payload: serializeProfileToJsonString(profile),
       });
       expect(view.phase).toBe('DATA_LOADED');
       expect(ProfileViewSelectors.getProfile(getState()).meta.product).toEqual(
@@ -1397,7 +1200,7 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: 'application/json',
-        payload: JSON.stringify(profile), // Note: No serializeProfile call!
+        payload: JSON.stringify(profile), // Note: No serializeProfileToJsonString call!
       });
 
       expect(view.phase).toBe('DATA_LOADED');
@@ -1446,7 +1249,7 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: '',
-        payload: serializeProfile(profile),
+        payload: serializeProfileToJsonString(profile),
       });
       expect(view.phase).toBe('DATA_LOADED');
       expect(ProfileViewSelectors.getProfile(getState()).meta.product).toEqual(
@@ -1460,7 +1263,9 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: '',
-        payload: extractArrayBuffer(await compress(serializeProfile(profile))),
+        payload: extractArrayBuffer(
+          await compress(serializeProfileToJsonString(profile))
+        ),
       });
       expect(view.phase).toBe('DATA_LOADED');
       expect(ProfileViewSelectors.getProfile(getState()).meta.product).toEqual(
@@ -1492,7 +1297,9 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: 'application/gzip',
-        payload: extractArrayBuffer(await compress(serializeProfile(profile))),
+        payload: extractArrayBuffer(
+          await compress(serializeProfileToJsonString(profile))
+        ),
       });
       expect(view.phase).toBe('DATA_LOADED');
       expect(ProfileViewSelectors.getProfile(getState()).meta.product).toEqual(
@@ -1506,7 +1313,9 @@ describe('actions/receive-profile', function () {
 
       const { getState, view } = await setupTestWithFile({
         type: 'application/json',
-        payload: extractArrayBuffer(await compress(serializeProfile(profile))),
+        payload: extractArrayBuffer(
+          await compress(serializeProfileToJsonString(profile))
+        ),
       });
       expect(view.phase).toBe('DATA_LOADED');
       expect(ProfileViewSelectors.getProfile(getState()).meta.product).toEqual(
@@ -1548,7 +1357,7 @@ describe('actions/receive-profile', function () {
     it('can load a zipped profile', async function () {
       const { getState, view } = await setupZipTestWithProfile(
         'profile.json',
-        serializeProfile(_getSimpleProfile())
+        serializeProfileToJsonString(_getSimpleProfile())
       );
       expect(view.phase).toBe('DATA_LOADED');
       const zipInStore = ZippedProfilesSelectors.getZipFile(getState());
@@ -1561,7 +1370,7 @@ describe('actions/receive-profile', function () {
     it('will load and view a simple profile with no errors', async function () {
       const { getState, dispatch } = await setupZipTestWithProfile(
         'profile.json',
-        serializeProfile(_getSimpleProfile())
+        serializeProfileToJsonString(_getSimpleProfile())
       );
 
       expect(ZippedProfilesSelectors.getZipFileState(getState()).phase).toEqual(
@@ -1579,7 +1388,7 @@ describe('actions/receive-profile', function () {
     it('will be an error to view a profile with no threads', async function () {
       const { getState, dispatch } = await setupZipTestWithProfile(
         'profile.json',
-        serializeProfile(getEmptyProfile())
+        serializeProfileToJsonString(getEmptyProfile())
       );
 
       expect(ZippedProfilesSelectors.getZipFileState(getState()).phase).toEqual(
@@ -1723,7 +1532,9 @@ describe('actions/receive-profile', function () {
           ])
         );
       }
-      window.fetchMock.getOnce('*', profile1).getOnce('*', profile2);
+      window.fetchMock
+        .getOnce('*', serializeProfileToJsonString(profile1))
+        .getOnce('*', serializeProfileToJsonString(profile2));
 
       const { dispatch, getState } = blankStore();
       await dispatch(retrieveProfilesToCompare([url1, url2]));
@@ -1800,7 +1611,6 @@ describe('actions/receive-profile', function () {
 
       const expectedThreads = [
         expect.objectContaining({
-          ...profile1.threads[0],
           pid: '0 from profile 1',
           tid: '0 from profile 1',
           isMainThread: true,
@@ -1940,29 +1750,27 @@ describe('actions/receive-profile', function () {
       //Get profiles with one screenshot track
       const profile1 = getProfileWithMarkers([
         [
-          'CompositorScreenshot',
+          'CompositorScreenshot 0',
           0,
           null,
           {
             type: 'CompositorScreenshot',
             url: 0, // Some arbitrary string.
             windowID: '0',
-            windowWidth: 300,
-            windowHeight: 150,
+            windowSize: { width: 300, height: 150 },
           },
         ],
       ]);
       const profile2 = getProfileWithMarkers([
         [
-          'CompositorScreenshot',
+          'CompositorScreenshot 1',
           0,
           null,
           {
             type: 'CompositorScreenshot',
             url: 0, // Some arbitrary string.
             windowID: '1',
-            windowWidth: 300,
-            windowHeight: 150,
+            windowSize: { width: 300, height: 150 },
           },
         ],
       ]);
@@ -1986,6 +1794,61 @@ describe('actions/receive-profile', function () {
         'show [thread Diff between 1 and 2 comparison]',
       ]);
     });
+
+    it('includes the screenshot track when only one profile has screenshot markers', async function () {
+      const store = blankStore();
+      const profile1 = getProfileWithMarkers([]);
+      const profile2 = getProfileWithMarkers([
+        [
+          'CompositorScreenshot 1',
+          0,
+          null,
+          {
+            type: 'CompositorScreenshot',
+            url: 0, // Some arbitrary string.
+            windowID: '1',
+            windowSize: { width: 300, height: 150 },
+          },
+        ],
+      ]);
+      const { resultProfile } = await setup(
+        {
+          profile1: profile1,
+          profile2: profile2,
+        },
+        {
+          url1: 'https://fakeurl.com/public/fakehash1/?thread=0&v=3',
+          url2: 'https://fakeurl.com/public/fakehash1/?thread=0&v=3',
+        }
+      );
+
+      store.dispatch(viewProfile(resultProfile));
+      expect(getHumanReadableTracks(store.getState())).toEqual([
+        'show [screenshots]',
+        'show [thread Empty default] SELECTED',
+        'show [thread Empty default]',
+        'show [thread Diff between 1 and 2 comparison]',
+      ]);
+    });
+
+    it('gives a fatal error when the selected thread index is out of bounds', async function () {
+      const { dispatch, getState } = blankStore();
+      const { profile1, profile2 } = getSomeProfiles();
+      window.fetchMock
+        .getOnce('*', serializeProfileToJsonString(profile1))
+        .getOnce('*', serializeProfileToJsonString(profile2));
+
+      await dispatch(
+        retrieveProfilesToCompare([
+          'https://fakeurl.com/public/fakehash1/?thread=5&v=3',
+          'https://fakeurl.com/public/fakehash2/?thread=0&v=3',
+        ])
+      );
+
+      const view = getView(getState());
+      expect(view.phase).toBe('FATAL_ERROR');
+      expect((view as any).error.message).toMatch(/out of bounds/);
+    });
   });
 
   describe('retrieveProfileForRawUrl', function () {
@@ -1993,13 +1856,19 @@ describe('actions/receive-profile', function () {
       location: Partial<Location>,
       requiredProfile: number = 1
     ) {
-      const profile = _getSimpleProfile();
+      const simpleProfile = _getSimpleProfile();
+      // Create a profile object we can use with fetchMock, which uses
+      // JSON.stringify internally. `simpleProfile` contains typed arrays which
+      // wouldn't survive JSON.stringfy, so we feed the pre-serialized JSON
+      // string to the fetch mock directly.
+      const profileJson = serializeProfileToJsonString(simpleProfile);
+      const profile = JSON.parse(profileJson);
       const geckoProfile = createGeckoProfile();
 
       // Add mock fetch response for the required number of times.
       // Usually it's 1 but it can be also 2 for `compare` dataSource.
       for (let i = 0; i < requiredProfile; i++) {
-        window.fetchMock.getOnce('*', profile);
+        window.fetchMock.getOnce('*', profileJson);
       }
 
       const geckoProfiler = {

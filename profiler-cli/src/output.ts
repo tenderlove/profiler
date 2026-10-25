@@ -1,0 +1,149 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/**
+ * Output formatting for profiler-cli commands.
+ */
+
+import { assertExhaustiveCheck } from 'firefox-profiler/utils/types';
+import type { CommandResult, PermalinkOutcome } from './protocol';
+import {
+  formatStatusResult,
+  formatPermalinkResult,
+  formatFunctionExpandResult,
+  formatFunctionInfoResult,
+  formatFunctionAnnotateResult,
+  formatViewRangeResult,
+  formatFilterStackResult,
+  formatThreadInfoResult,
+  formatThreadListResult,
+  formatMarkerStackResult,
+  formatMarkerInfoResult,
+  formatMarkerInfoMultiResult,
+  formatProfileInfoResult,
+  formatProfileMetaResult,
+  formatThreadSamplesResult,
+  formatThreadSamplesTopDownResult,
+  formatThreadSamplesBottomUpResult,
+  formatThreadMarkersResult,
+  formatThreadFunctionsResult,
+  formatThreadNetworkResult,
+  formatProfileLogsResult,
+  formatProfileMarkersResult,
+  formatThreadPageLoadResult,
+  formatThreadSelectResult,
+  formatStrategySelectResult,
+  formatCounterListResult,
+  formatCounterInfoResult,
+  formatSourceMapSourcesResult,
+  formatApplySourceMapResult,
+  formatProfileSaveResult,
+} from './formatters';
+
+/**
+ * Format a command result for output.
+ * If jsonFlag is true, outputs JSON. Otherwise outputs as plain text.
+ */
+export function formatOutput(
+  result: string | CommandResult,
+  jsonFlag: boolean,
+  permalink?: PermalinkOutcome
+): string {
+  if (jsonFlag) {
+    const object =
+      typeof result === 'string' ? { type: 'text', result } : result;
+    if (permalink === undefined) {
+      return JSON.stringify(object, null, 2);
+    }
+    const withPermalink =
+      'error' in permalink
+        ? { ...object, permalink: null, permalinkError: permalink.error }
+        : { ...object, permalink: formatPermalinkResult(permalink) };
+    return JSON.stringify(withPermalink, null, 2);
+  }
+
+  const text = formatText(result);
+  if (permalink === undefined) {
+    return text;
+  }
+  const permalinkLine =
+    'error' in permalink
+      ? `Permalink unavailable: ${permalink.error}`
+      : `Permalink: ${formatPermalinkResult(permalink)}`;
+  return `${text}\n\n${permalinkLine}`;
+}
+
+function formatText(result: string | CommandResult): string {
+  if (typeof result === 'string') {
+    return result;
+  }
+
+  switch (result.type) {
+    case 'status':
+      return formatStatusResult(result);
+    case 'permalink':
+      return formatPermalinkResult(result);
+    case 'filter-stack':
+      return formatFilterStackResult(result);
+    case 'function-expand':
+      return formatFunctionExpandResult(result);
+    case 'function-info':
+      return formatFunctionInfoResult(result);
+    case 'function-annotate':
+      return formatFunctionAnnotateResult(result);
+    case 'view-range':
+      return formatViewRangeResult(result);
+    case 'thread-info':
+      return formatThreadInfoResult(result);
+    case 'thread-list':
+      return formatThreadListResult(result);
+    case 'marker-stack':
+      return formatMarkerStackResult(result);
+    case 'marker-info':
+      return formatMarkerInfoResult(result);
+    case 'marker-info-multi':
+      return formatMarkerInfoMultiResult(result);
+    case 'profile-info':
+      return formatProfileInfoResult(result);
+    case 'profile-meta':
+      return formatProfileMetaResult(result);
+    case 'thread-samples':
+      return formatThreadSamplesResult(result);
+    case 'thread-samples-top-down':
+      return formatThreadSamplesTopDownResult(result);
+    case 'thread-samples-bottom-up':
+      return formatThreadSamplesBottomUpResult(result);
+    case 'thread-markers':
+      return formatThreadMarkersResult(result);
+    case 'thread-functions':
+      return formatThreadFunctionsResult(result);
+    case 'thread-network':
+      return formatThreadNetworkResult(result);
+    case 'profile-logs':
+      return formatProfileLogsResult(result);
+    case 'profile-markers':
+      return formatProfileMarkersResult(result);
+    case 'profile-save':
+      return formatProfileSaveResult(result);
+    case 'thread-page-load':
+      return formatThreadPageLoadResult(result);
+    case 'thread-select':
+      return formatThreadSelectResult(result);
+    case 'strategy-select':
+      return formatStrategySelectResult(result);
+    case 'counter-list':
+      return formatCounterListResult(result);
+    case 'counter-info':
+      return formatCounterInfoResult(result);
+    case 'sourcemap-sources':
+      return formatSourceMapSourcesResult(result);
+    case 'sourcemap-applied':
+    case 'sourcemap-unchanged':
+    case 'sourcemap-ambiguous':
+    case 'sourcemap-error':
+      return formatApplySourceMapResult(result);
+    default:
+      throw assertExhaustiveCheck(result);
+  }
+}

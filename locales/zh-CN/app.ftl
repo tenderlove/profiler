@@ -46,6 +46,9 @@ AppViewRouter--error-compare = 无法获取分析记录。
 # https://profiler.firefox.com/from-url/http%3A%2F%2F127.0.0.1%3A3000%2Fprofile.json/
 AppViewRouter--error-from-localhost-url-safari = 由于 <a>Safari 浏览器的特殊限制</a>，{ -profiler-brand-name } 无法使用此浏览器从本地导入分析记录。请在 { -firefox-brand-name } 或 Chrome 中打开此页面。
     .title = Safari 浏览器无法导入本地性能分析记录
+# This error message is displayed when the profile is in a newer format version
+# than this build of the Profiler is able to read.
+AppViewRouter--error-profile-version = 此性能分析记录所用的格式不受当前版本的 { -profiler-brand-name } 支持。请尝试刷新页面，检查 { -profiler-brand-name } 是否有可用更新。
 AppViewRouter--route-not-found--home =
     .specialMessage = 无法识别您尝试访问的 URL。
 
@@ -75,6 +78,15 @@ CallNodeContextMenu--transform-focus-function = 聚焦于函数
     .title = { CallNodeContextMenu--transform-focus-function-title }
 CallNodeContextMenu--transform-focus-function-inverted = 聚焦于函数（反向）
     .title = { CallNodeContextMenu--transform-focus-function-title }
+
+## The translation for "self" in these strings should match the translation used
+## in CallTree--samples-self and CallTree--bytes-self. Alternatively it can be
+## translated as "self values" or "self time" (though "self time" is less desirable
+## because this menu item is also shown in "bytes" mode).
+
+CallNodeContextMenu--transform-focus-self-title = “聚焦于自身”类似于“聚焦于函数”，但仅保留影响函数自身耗时的样本。被调用函数的样本将被丢弃，且会重新将调用树的根指定为聚焦的函数。
+CallNodeContextMenu--transform-focus-self = 只聚焦于自身
+    .title = { CallNodeContextMenu--transform-focus-self-title }
 
 ##
 
@@ -112,16 +124,16 @@ CallNodeContextMenu--show-the-function-in-devtools = 在开发者工具中显示
 
 CallTree--tracing-ms-total = 总运行时间（ms）
     .title = 此函数在栈上被观察到出现的“总计”时长汇总。包含函数实际运行的时长，以及此函数中所调用的时长。
-CallTree--tracing-ms-self = Self（ms）
-    .title = “Self”时间只包含函数在栈底结束时的时间。若此函数是通过其他函数调用的，则不包含“该函数”的时间。“self”时间适合用于了解程序中实际用了多长时间在哪些函数上。
+CallTree--tracing-ms-self = 自身（ms）
+    .title = “自身”时间只包含函数在栈底结束时的时间。若此函数是通过其他函数调用的，则不包含“该函数”的时间。“自身”时间适合用于了解程序中实际用了多长时间在哪些函数上。
 CallTree--samples-total = 总计（样本数）
     .title = 此函数在栈上被观察到出现的“总计”次数汇总。包含实际运行的的次数，以及此函数中所调用的次数。
-CallTree--samples-self = Self
-    .title = “Self”样本数只包含函数在栈底结束时的次数。若此函数是通过其他函数调用的，则不包含“该函数”的次数。“self”次数适合用于了解程序中实际用了多长时间在哪些函数上。
+CallTree--samples-self = 自身
+    .title = “自身”样本数只包含函数在栈底结束时的次数。若此函数是通过其他函数调用的，则不包含“该函数”的次数。“自身”次数适合用于了解程序中实际用了多长时间在哪些函数上。
 CallTree--bytes-total = 总大小（字节）
     .title = 此函数在栈上被观察到分配或释放的“总计”字节汇总。包含函数实际运行时使用的大小，以及此函数中所调用其他函数所用的内存大小。
-CallTree--bytes-self = Self（字节）
-    .title = “Self”字节数只包含函数在栈底分配或释放的内存用量。若此函数是通过其他函数调用的，则不包含“该函数”的用量。“Self”字节数适合用于了解程序中实际用了多少内存在哪些函数上。
+CallTree--bytes-self = 自身（字节）
+    .title = “自身”字节数只包含函数在栈底分配或释放的内存用量。若此函数是通过其他函数调用的，则不包含“该函数”的用量。“自身”字节数适合用于了解程序中实际用了多少内存在哪些函数上。
 
 ## Call tree "badges" (icons) with tooltips
 ##
@@ -222,16 +234,17 @@ ErrorBoundary--report-error-to-developers-description = 请将此问题报告给
 # This is used in a call to action button, displayed inside the error box.
 ErrorBoundary--report-error-on-github = 到 GitHub 报告错误
 
-## Footer Links
+## Settings Menu
+## The settings popup opened from the cog icon in the top bar.
 
-FooterLinks--legal = 法律
-FooterLinks--Privacy = 隐私
-FooterLinks--Cookies = Cookie
-FooterLinks--languageSwitcher--select =
+SettingsMenu--button =
+    .title = 设置
+SettingsMenu--docs = 文档
+SettingsMenu--legal = 法律信息
+SettingsMenu--privacy = 隐私
+SettingsMenu--cookies = Cookie
+SettingsMenu--language-switcher =
     .title = 更改语言
-FooterLinks--hide-button =
-    .title = 隐藏页脚链接
-    .aria-label = 隐藏页脚链接
 
 ## FullTimeline
 ## The timeline component of the full view in the analysis UI at the top of the
@@ -267,7 +280,11 @@ Home--enable-button-unavailable =
 # This message can be seen on https://main--perf-html.netlify.app/ .
 Home--web-channel-unavailable = 此分析器无法连接至 WebChannel。通常是因为运行分析器的主机与 <code>devtools.performance.recording.ui-base-url</code> 首选项中指定的主机不同。若您想要使用此分析器捕捉新的性能分析记录，并可程序化控制分析器菜单按钮，可到 <code>about:config</code> 调整该首选项。
 Home--record-instructions = 要进行分析，请点击“分析”按钮，或使用键盘快捷键。在性能记录时，此图标将会变为蓝色。按下<kbd>捕捉</kbd>即可将数据加载至 profiler.firefox.com。
-Home--instructions-content = 需使用 <a>{ -firefox-brand-name }</a> 记录性能分析信息。但可以使用任何现代浏览器查看现有分析记录。
+Home--instructions-content2 = 记录性能分析数据需要使用<a>桌面版 { -firefox-brand-name }</a>，但已有的分析记录可使用任意现代浏览器查看。
+Home--fenix-instructions-directly = 可直接在此设备上对 { -firefox-android-brand-name } 进行性能分析。有关更多信息，请阅读<a>直接在设备上对 { -firefox-android-brand-name } 进行性能分析</a>。
+Home--fenix-instructions-remotely =
+    您也可以通过桌面版 { -firefox-brand-name } 对 { -firefox-android-brand-name } 进行远程性能分析。有关更多信息，请参阅文档：
+    <a>对 { -firefox-android-brand-name } 进行远程性能分析</a>。
 Home--record-instructions-start-stop = 停止并开始分析
 Home--record-instructions-capture-load = 捕捉并加载分析记录
 Home--profiler-motto = 捕捉性能分析记录。剖析、分享、让网站速度更快。
@@ -275,6 +292,7 @@ Home--additional-content-title = 加载现有分析记录
 Home--additional-content-content = 您可以将分析记录<strong>拖放</strong>至此处，或：
 Home--compare-recordings-info = 您也可以比较记录内容。<a>打开比较界面。</a>
 Home--your-recent-uploaded-recordings-title = 您最近上传的记录
+Home--dark-mode-title = 深色模式
 # We replace the elements such as <perf> and <simpleperf> with links to the
 # documentation to use these tools.
 Home--load-files-from-other-tools2 = { -profiler-brand-name } 也可以从其他分析器导入记录，例如 <perf>Linux perf</perf>、<simpleperf>Android SimplePerf</simpleperf>、Chrome 性能面板、<androidstudio>Android Studio</androidstudio>，支持直接导入 <dhat>dhat</dhat>、<traceevent>Google 的 Trace Event</traceevent> 格式保存的分析记录。<write>点此了解如何编写您自己的导入程序</write>。
@@ -282,17 +300,11 @@ Home--install-chrome-extension = 安装 Chrome 扩展
 Home--chrome-extension-instructions = 使用 <a>Chrome 版 { -profiler-brand-name } 扩展</a>，在 Chrome 中捕捉性能分析记录，并通过 { -profiler-brand-name } 分析。可到 Chrome 应用商店安装扩展。
 Home--chrome-extension-recording-instructions = 安装后，即可使用扩展的工具栏图标和快捷键来开始或停止分析，也可以导出分析记录并在此处加载以进行详细分析。
 
-## IdleSearchField
-## The component that is used for all the search inputs in the application.
-
-IdleSearchField--search-input =
-    .placeholder = 输入过滤条件
-
 ## JsTracerSettings
 ## JSTracer is an experimental feature and it's currently disabled. See Bug 1565788.
 
-JsTracerSettings--show-only-self-time = 只显示 self 时间
-    .title = 只显示调用节点所用的时间，而忽略其 children。
+JsTracerSettings--show-only-self-time = 只显示自身耗时
+    .title = 只显示调用节点所用的时间，而忽略其子节点。
 
 ## ListOfPublishedProfiles
 ## This is the component that displays all the profiles the user has uploaded.
@@ -399,8 +411,8 @@ MarkerTable--details = 详情
 # Variables:
 #   $filter (String) - Search string that will be used to filter the markers.
 MarkerTooltip--filter-button-tooltip =
-    .title = 仅显示匹配“{ $filter }”的标记
     .aria-label = 仅显示匹配“{ $filter }”的标记
+    .title = 仅显示匹配“{ $filter }”的标记
 
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
@@ -409,14 +421,9 @@ MenuButtons--index--metaInfo-button =
     .label = “分析记录”信息
 MenuButtons--index--full-view = 全视图
 MenuButtons--index--cancel-upload = 取消上传
-MenuButtons--index--share-upload =
-    .label = 上传本地分析记录
-MenuButtons--index--share-re-upload =
-    .label = 重新上传
 MenuButtons--index--share-error-uploading =
     .label = 上传时出错
 MenuButtons--index--revert = 恢复到原始分析记录
-MenuButtons--index--docs = 文档
 MenuButtons--permalink--button =
     .label = 永久链接
 
@@ -550,7 +557,9 @@ MenuButtons--publish--renderCheckbox-label-preference = 包含首选项值
 MenuButtons--publish--renderCheckbox-label-private-browsing = 包含来自隐私浏览窗口的数据
 MenuButtons--publish--renderCheckbox-label-private-browsing-warning-image =
     .title = 此分析记录包含隐私浏览数据
-MenuButtons--publish--reupload-performance-profile = 重新上传性能分析记录
+MenuButtons--publish--renderCheckbox-label-argument-values = 包含 JavaScript 执行跟踪函数的参数值
+MenuButtons--publish--renderCheckbox-label-argument-values-warning-image =
+    .title = 此分析记录包含从该页面获取的函数参数值，因此它可能包含个人数据
 MenuButtons--publish--share-performance-profile = 分享性能分析记录
 MenuButtons--publish--info-description = 上传您的分析记录，并通过链接分享给任何人。
 MenuButtons--publish--info-description-default = 默认情况下，将会移除您的个人数据。
@@ -561,7 +570,6 @@ MenuButtons--publish--upload-title = 正在上传分析记录…
 MenuButtons--publish--cancel-upload = 取消上传
 MenuButtons--publish--message-something-went-wrong = 啊哦，上传分析记录时出了点问题。
 MenuButtons--publish--message-try-again = 再试一次
-MenuButtons--publish--download = 下载
 MenuButtons--publish--compressing = 正在压缩…
 MenuButtons--publish--error-while-compressing = 压缩时出错，请尝试取消选中某些复选框以减小配置文件大小。
 
@@ -596,8 +604,8 @@ PanelSearch--search-field-hint = 您知道可以使用半角逗号（,）搜索�
 ProfileName--edit-profile-name-button =
     .title = 编辑分析记录名
 ProfileName--edit-profile-name-input =
-    .title = 编辑分析记录名
     .aria-label = 分析记录名
+    .title = 编辑分析记录名
 
 ## Profile Delete Button
 
@@ -676,8 +684,8 @@ ServiceWorkerManager--updated-while-not-ready =
     您可能会遇到些许异常。
 ServiceWorkerManager--new-version-is-ready = 该应用程序的新版本已下载，随时可安装。
 ServiceWorkerManager--hide-notice-button =
-    .title = 隐藏重新加载通知
     .aria-label = 隐藏重新加载通知
+    .title = 隐藏重新加载通知
 
 ## StackSettings
 ## This is the settings component that is used in Call Tree, Flame Graph and Stack
@@ -688,7 +696,7 @@ StackSettings--implementation-all-frames = 所有帧
 StackSettings--implementation-script = 脚本
     .title = 只显示与执行脚本相关的栈帧
 StackSettings--implementation-native2 = 原生
-    .title = 仅显示栈上的原生代码帧
+    .title = 只显示原生代码栈帧
 # This label is displayed in the marker chart and marker table panels only.
 StackSettings--stack-implementation-label = 过滤栈：
 StackSettings--use-data-source-label = 数据源：
@@ -706,6 +714,8 @@ StackSettings--call-tree-strategy-native-deallocations-sites = 释放的位置
     .title = 按照取释放内存的位置，根据释放的内存字节数进行汇总
 StackSettings--invert-call-stack = 反转调用栈
     .title = 按照调用节点中所用时间排序，并忽略其 children。
+StackSettings--include-idle-samples = 包含空闲样本
+    .title = 取消勾选可隐藏叶帧属于“空闲”类别的样本。
 StackSettings--show-user-timing = 显示用户计时
 StackSettings--use-stack-chart-same-widths = 所有栈使用相同宽度显示
 StackSettings--panel-search =
@@ -767,14 +777,13 @@ TrackNameButton--hide-track =
 TrackNameButton--hide-process =
     .title = 隐藏进程
 
-## TrackMemoryGraph
-## This is used to show the memory graph of that process in the timeline part of
-## the UI. To learn more about it, visit:
-## https://profiler.firefox.com/docs/#/./memory-allocations?id=memory-track
+## TrackProcessCPUGraph
+## This is used to show the CPU usage of a process over time in the timeline.
 
-TrackMemoryGraph--relative-memory-at-this-time = 此时的相对内存用量
-TrackMemoryGraph--memory-range-in-graph = 图表里的内存范围
-TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample = 自上次采样以来的分配和释放情况
+# Variables:
+#   $value (String) - the CPU usage at this sample (e.g. "50%")
+TrackProcessCPUGraph--cpu = { $value }
+    .label = CPU
 
 ## TrackPower
 ## This is used to show the power used by the CPU and other chips in a computer,
@@ -955,6 +964,12 @@ TransformNavigator--focus-subtree = 聚焦节点：{ $item }
 # Variables:
 #   $item (String) - Name of the function that transform applied to.
 TransformNavigator--focus-function = 聚焦：{ $item }
+# "Focus self" transform.
+# See: https://profiler.firefox.com/docs/#/./guide-filtering-call-trees?id=focus-on-function-self
+# Also see the translation note above CallNodeContextMenu--transform-focus-self.
+# Variables:
+#   $item (String) - Name of the function that transform applied to.
+TransformNavigator--focus-self = 聚焦于自身：{ $item }
 # "Focus category" transform. The word "Focus" has the meaning of an adjective here.
 # See: https://profiler.firefox.com/docs/#/./guide-filtering-call-trees?id=focus-category
 # Variables:
@@ -1026,6 +1041,12 @@ BottomBox--assembly-code-not-available-title = 汇编代码不可用
 # Elements:
 #   <a>link text</a> - A link to the github issue about supported scenarios.
 BottomBox--assembly-code-not-available-text = 关于支持的使用场景和改进计划，请参阅 <a>issue #4520</a>。
+# The toggle button for making the bottom box fullscreen.
+BottomBox--hide-fullscreen =
+    .title = 退出全屏
+# The toggle button for making the bottom box fullscreen.
+BottomBox--show-fullscreen =
+    .title = 全屏
 SourceView--close-button =
     .title = 关闭源代码视图
 
@@ -1106,6 +1127,11 @@ AssemblyView--prev-button =
 # The "▶" button above the assembly view.
 AssemblyView--next-button =
     .title = 下一个
+# The label showing the current position and total count above the assembly view.
+# Variables:
+#   $current (Number) - The current position (1-indexed).
+#   $total (Number) - The total count.
+AssemblyView--position-label = { $current } / { $total }
 
 ## UploadedRecordingsHome
 ## This is the page that displays all the profiles that user has uploaded.

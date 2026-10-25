@@ -11,6 +11,7 @@ import { stateFromLocation } from '../../app-logic/url-handling';
 import {
   getProfileFromTextSamples,
   getProfileWithMarkers,
+  addCompositorScreenshotSchemaIfNeeded,
   addMarkersToThreadWithCorrespondingSamples,
 } from '../fixtures/profiles/processed-profile';
 import { markerSchemaForTests } from '../fixtures/profiles/marker-schema';
@@ -18,6 +19,7 @@ import { ensureExists } from 'firefox-profiler/utils/types';
 import { getTimeRangeIncludingAllThreads } from 'firefox-profiler/profile-logic/profile-data';
 import { StringTable } from '../../utils/string-table';
 import type { RawProfileSharedData, Profile } from 'firefox-profiler/types';
+import { ResourceType, FrameFlag, FuncFlag } from 'firefox-profiler/types';
 import { callTreeFromProfile, formatTree } from '../fixtures/utils';
 import { storeWithProfile } from '../fixtures/stores';
 import { addTransformToStack } from '../../actions/profile-view';
@@ -29,11 +31,13 @@ import {
 
 describe('mergeProfilesForDiffing function', function () {
   it('merges the various tables properly in the diffing profile', function () {
+    // The frames need addresses, because the frame's lib is only meaningful
+    // together with an address (they share the HasAddress flag).
     const sampleProfileA = getProfileFromTextSamples(
-      'A[lib:libA]  B[lib:libA]'
+      'A[lib:libA][address:10]  B[lib:libA][address:20]'
     );
     const sampleProfileB = getProfileFromTextSamples(
-      'A[lib:libA]  A[lib:libB]  C[lib:libC]'
+      'A[lib:libA][address:10]  A[lib:libB][address:30]  C[lib:libC][address:40]'
     );
     const profileState = stateFromLocation({
       pathname: '/public/fakehash1/',
@@ -50,6 +54,7 @@ describe('mergeProfilesForDiffing function', function () {
     const mergedShared = mergedProfile.shared;
     const mergedResources = mergedShared.resourceTable;
     const mergedFunctions = mergedShared.funcTable;
+    const mergedFrames = mergedShared.frameTable;
     const stringArray = mergedShared.stringArray;
 
     expect(mergedLibs).toHaveLength(3);
@@ -59,9 +64,8 @@ describe('mergeProfilesForDiffing function', function () {
     // Now check that all functions are linked to the right resources.
     // We should have 2 A functions, linked to 2 different resources.
     // And we should have 1 B function, and 1 C function.
-    const libsForA = [];
-    const resourcesForA = [];
-    for (let funcIndex = 0; funcIndex < mergedFunctions.length; funcIndex++) {
+    for (let frameIndex = 0; frameIndex < mergedFrames.length; frameIndex++) {
+      const funcIndex = mergedFrames.func[frameIndex];
       const funcName = stringArray[mergedFunctions.name[funcIndex]];
       const resourceIndex = mergedFunctions.resource[funcIndex];
 
@@ -72,18 +76,20 @@ describe('mergeProfilesForDiffing function', function () {
         if (nameIndex >= 0) {
           resourceName = stringArray[nameIndex];
         }
-
-        const libIndex = mergedResources.lib[resourceIndex];
-        if (libIndex !== null && libIndex !== undefined && libIndex >= 0) {
-          libName = mergedLibs[libIndex].name;
-        }
+      }
+      const libIndex = mergedFrames.lib[frameIndex];
+      if (libIndex !== null) {
+        libName = mergedLibs[libIndex].name;
       }
 
-      /* eslint-disable jest/no-conditional-expect */
+      // These conditional expects aren't reported because of an oxlint bug:
+      // https://github.com/oxc-project/oxc/issues/28054
+      // Once it's fixed, wrap this switch in
+      // oxlint-disable/enable jest/no-conditional-expect comments.
       switch (funcName) {
         case 'A':
-          libsForA.push(libName);
-          resourcesForA.push(resourceName);
+          expect(libName).toBeOneOf(['libA', 'libB']);
+          expect(resourceName).toBeOneOf(['libA', 'libB']);
           break;
         case 'B':
           expect(libName).toBe('libA');
@@ -95,10 +101,51 @@ describe('mergeProfilesForDiffing function', function () {
           break;
         default:
       }
-      /* eslint-enable */
     }
-    expect(libsForA).toEqual(['libA', 'libB']);
-    expect(resourcesForA).toEqual(['libA', 'libB']);
+  });
+
+  it('keeps two builds of the same library apart while sharing one resource', function () {
+    // This is the case that motivated moving the lib column off the
+    // resourceTable and onto the frameTable: comparing two builds of libxul.
+    // Both builds have the same name, so they share a single resource, but they
+    // have different breakpadIds and so must stay separate libs - symbols have
+    // to be looked up separately for each build.
+    const sampleProfileA = getProfileFromTextSamples(
+      'A[lib:libxul.so][address:10]'
+    );
+    const sampleProfileB = getProfileFromTextSamples(
+      'A[lib:libxul.so][address:10]'
+    );
+    sampleProfileB.profile.libs[0] = {
+      ...sampleProfileB.profile.libs[0],
+      breakpadId: 'A_DIFFERENT_BUILD',
+    };
+    const profileState = stateFromLocation({
+      pathname: '/public/fakehash1/',
+      search: '?thread=0&v=3',
+      hash: '',
+    });
+
+    const { profile: mergedProfile } = mergeProfilesForDiffing(
+      [sampleProfileA.profile, sampleProfileB.profile],
+      [profileState, profileState]
+    );
+    const { resourceTable, frameTable, stringArray } = mergedProfile.shared;
+
+    // The two builds have separate libs.
+    expect(mergedProfile.libs.map((lib) => lib.breakpadId)).toEqual([
+      'SOMETHING_FAKE',
+      'A_DIFFERENT_BUILD',
+    ]);
+
+    // But there's only one resource because both libs are called `libxul.so`.
+    const libraryResources = resourceTable.name
+      .filter((_name, i) => resourceTable.type[i] === ResourceType.Library)
+      .map((nameIndex) => stringArray[nameIndex]);
+    expect(libraryResources).toEqual(['libxul.so']);
+
+    // The frames still have different libs.
+    expect([...frameTable.lib]).toEqual([0, 1]);
   });
 
   it('should set interval of merged profile to minimum of all intervals', function () {
@@ -213,7 +260,7 @@ describe('mergeProfilesForDiffing function', function () {
       ],
       address: [0x20, 0x50],
       libIndex: [0, 0],
-      functionSize: [null, null],
+      functionSize: [-1, -1],
     };
 
     sampleProfileB.profile.shared.nativeSymbols = {
@@ -224,7 +271,7 @@ describe('mergeProfilesForDiffing function', function () {
       ],
       address: [0x25, 0x45],
       libIndex: [0, 0],
-      functionSize: [null, null],
+      functionSize: [-1, -1],
     };
 
     const profileState = stateFromLocation({
@@ -239,7 +286,9 @@ describe('mergeProfilesForDiffing function', function () {
 
     // The merged profile has a single merged libs list, so the native symbols
     // should now be merged with updated libIndexes.
-    expect(mergedProfile.shared.nativeSymbols.libIndex).toEqual([0, 0, 1, 1]);
+    expect([...mergedProfile.shared.nativeSymbols.libIndex]).toEqual([
+      0, 0, 1, 1,
+    ]);
   });
 
   it('should use marker timing if there are no samples', () => {
@@ -319,6 +368,57 @@ describe('mergeProfilesForDiffing function', function () {
       '  - Y (total: 2, self: 2)',
       '  - Z (total: 2, self: 2)',
     ]);
+  });
+
+  it('keeps the screenshot markers of a profile when the other profile has none', function () {
+    const { profile: profileA } = getProfileFromTextSamples('A  B  C');
+    const { profile: profileB, stringTable: stringTableB } =
+      getProfileFromTextSamples('D');
+    const screenshotUrl = 'Screenshot Url';
+    addMarkersToThreadWithCorrespondingSamples(
+      profileB.threads[0],
+      profileB.shared,
+      [
+        [
+          'CompositorScreenshot 0',
+          1,
+          2,
+          {
+            type: 'CompositorScreenshot',
+            url: stringTableB.indexForString(screenshotUrl),
+            windowID: '0',
+            windowSize: { width: 300, height: 150 },
+          },
+        ],
+      ]
+    );
+    addCompositorScreenshotSchemaIfNeeded(profileB);
+
+    const profileState = stateFromLocation({
+      pathname: '/public/fakehash1/',
+      search: '?thread=0&v=3',
+      hash: '',
+    });
+    const { profile: mergedProfile } = mergeProfilesForDiffing(
+      [profileA, profileB],
+      [profileState, profileState]
+    );
+
+    expect(mergedProfile.meta.markerSchema.map(({ name }) => name)).toContain(
+      'CompositorScreenshot'
+    );
+
+    const mergedStringTable = StringTable.withBackingArray(
+      mergedProfile.shared.stringArray
+    );
+    const screenshotData = ensureExists(
+      mergedProfile.threads[1].markers.data.find(
+        (data) => data !== null && data.type === 'CompositorScreenshot'
+      )
+    );
+    expect(
+      mergedStringTable.getString(ensureExists((screenshotData as any).url))
+    ).toBe(screenshotUrl);
   });
 
   it('should preserve transforms and produce matching call trees', () => {
@@ -592,7 +692,9 @@ describe('mergeThreads function', function () {
     // New marker table doesn't have to be sorted. Because we sort it while we
     // are getting it from selector anyway.
     expect(markerStartTimes).toEqual([2, 3, 6, 1, 3, 8]);
-    expect(markerEndTimes).toEqual([null, 5, 7, null, 4, 9]);
+    // The end times of instant markers are meaningless; they're stored as zero
+    // in the Float64Array end time column.
+    expect(markerEndTimes).toEqual([0, 5, 7, 0, 4, 9]);
     expect(markerThreadIds).toEqual([0, 0, 0, 1, 1, 1]);
   });
 
@@ -687,8 +789,7 @@ describe('mergeThreads function', function () {
           type: 'CompositorScreenshot',
           url: screenshot1UrlIndex,
           windowID: 'XXX',
-          windowWidth: 300,
-          windowHeight: 600,
+          windowSize: { width: 300, height: 600 },
         },
       ],
     ]);
@@ -702,8 +803,7 @@ describe('mergeThreads function', function () {
           type: 'CompositorScreenshot',
           url: screenshot2UrlIndex,
           windowID: 'YYY',
-          windowWidth: 300,
-          windowHeight: 600,
+          windowSize: { width: 300, height: 600 },
         },
       ],
     ]);
@@ -831,7 +931,7 @@ describe('mergeProfilesForDiffing with source tables', function () {
     );
 
     // Check that UUIDs are properly handled (should all be null for text samples)
-    expect(sources.uuid).toEqual([null, null, null, null]);
+    expect(sources.id).toEqual([null, null, null, null]);
 
     // Verify each filename index points to a valid string
     for (const filenameIndex of sources.filename) {
@@ -854,8 +954,8 @@ describe('mergeProfilesForDiffing with source tables', function () {
     `);
 
     // Manually modify the source tables to have UUIDs
-    profileA.profile.shared.sources.uuid[0] = 'uuid-a';
-    profileB.profile.shared.sources.uuid[0] = 'uuid-b';
+    profileA.profile.shared.sources.id[0] = 'uuid-a';
+    profileB.profile.shared.sources.id[0] = 'uuid-b';
 
     const profileState = stateFromLocation({
       pathname: '/public/fakehash1/',
@@ -882,8 +982,8 @@ describe('mergeProfilesForDiffing with source tables', function () {
     expect(sourceFilenames.filter((name) => name === 'script.js')).toHaveLength(
       2
     );
-    expect(sources.uuid).toHaveLength(2);
-    expect(sources.uuid).toEqual(expect.arrayContaining(['uuid-a', 'uuid-b']));
+    expect(sources.id).toHaveLength(2);
+    expect(sources.id).toEqual(expect.arrayContaining(['uuid-a', 'uuid-b']));
 
     // Both should point to the same filename string
     const filenameIndexes = sources.filename;
@@ -955,7 +1055,7 @@ describe('mergeProfilesForDiffing with source tables', function () {
 
     // Should still have some sources from the profile structure
     expect(mergedProfile.shared.sources.filename).toBeArray();
-    expect(mergedProfile.shared.sources.uuid).toBeArray();
+    expect(mergedProfile.shared.sources.id).toBeArray();
     expect(mergedProfile.shared.sources.length).toBeNumber();
     expect(mergedProfile.shared.sources.length).toBeGreaterThanOrEqual(0);
   });
@@ -984,5 +1084,132 @@ describe('mergeProfilesForDiffing with source tables', function () {
     expect(mergedProfile.shared.sources).toEqual(
       singleProfile.profile.shared.sources
     );
+  });
+
+  it('should merge sourceLocationTables and remap funcTable / frameTable references', function () {
+    const profileA = getProfileFromTextSamples(`
+      A[file:bundle-a.js]
+    `);
+    const profileB = getProfileFromTextSamples(`
+      B[file:bundle-b.js]
+    `);
+
+    // Pre-populate sourceLocationTable and the func/frame columns that reference it.
+    // bundle-a.js source is index 0 in each per-profile table (sources from
+    // getProfileFromTextSamples have null id but a filename string).
+    const sharedA = profileA.profile.shared;
+    sharedA.sourceLocationTable.source.push(0);
+    sharedA.sourceLocationTable.line.push(11);
+    sharedA.sourceLocationTable.column.push(22);
+    sharedA.sourceLocationTable.length = 1;
+    sharedA.funcTable.originalLocation[0] = 0;
+    sharedA.funcTable.flags[0] |= FuncFlag.HasOriginalLocation;
+    sharedA.frameTable.originalLocation[0] = 0;
+    sharedA.frameTable.flags[0] |= FrameFlag.HasOriginalLocation;
+
+    const sharedB = profileB.profile.shared;
+    sharedB.sourceLocationTable.source.push(0);
+    sharedB.sourceLocationTable.line.push(33);
+    sharedB.sourceLocationTable.column.push(44);
+    sharedB.sourceLocationTable.length = 1;
+    sharedB.funcTable.originalLocation[0] = 0;
+    sharedB.funcTable.flags[0] |= FuncFlag.HasOriginalLocation;
+    sharedB.frameTable.originalLocation[0] = 0;
+    sharedB.frameTable.flags[0] |= FrameFlag.HasOriginalLocation;
+
+    const profileState = stateFromLocation({
+      pathname: '/public/fakehash1/',
+      search: '?thread=0&v=3',
+      hash: '',
+    });
+
+    const { profile: mergedProfile } = mergeProfilesForDiffing(
+      [profileA.profile, profileB.profile],
+      [profileState, profileState]
+    );
+
+    const { funcTable, frameTable, sourceLocationTable, sources } =
+      mergedProfile.shared;
+    const stringTable = StringTable.withBackingArray(
+      mergedProfile.shared.stringArray
+    );
+
+    // Both inputs' sourceLocationTable rows survive the merge (no dedup).
+    expect(sourceLocationTable.length).toBe(2);
+
+    // source indices are remapped through the merged sources table.
+    for (let i = 0; i < sourceLocationTable.length; i++) {
+      const src = sourceLocationTable.source[i];
+      expect(src).not.toBeNull();
+      expect(src).toBeGreaterThanOrEqual(0);
+      expect(src).toBeLessThan(sources.length);
+    }
+
+    // Each input's funcTable.originalLocation[0] now points at the corresponding
+    // remapped row, and the remapped row carries the correct original line.
+    const funcAName = stringTable.indexForString('A');
+    const funcBName = stringTable.indexForString('B');
+    const funcAIndex = funcTable.name.indexOf(funcAName);
+    const funcBIndex = funcTable.name.indexOf(funcBName);
+    expect(funcAIndex).toBeGreaterThanOrEqual(0);
+    expect(funcBIndex).toBeGreaterThanOrEqual(0);
+
+    expect(funcTable.flags[funcAIndex] & FuncFlag.HasOriginalLocation).not.toBe(
+      0
+    );
+    expect(funcTable.flags[funcBIndex] & FuncFlag.HasOriginalLocation).not.toBe(
+      0
+    );
+    const funcAOriginalLocationIdx = funcTable.originalLocation[funcAIndex];
+    const funcBOriginalLocationIdx = funcTable.originalLocation[funcBIndex];
+    expect(
+      sourceLocationTable.line[ensureExists(funcAOriginalLocationIdx)]
+    ).toBe(11);
+    expect(
+      sourceLocationTable.line[ensureExists(funcBOriginalLocationIdx)]
+    ).toBe(33);
+
+    // The frame columns are populated for every row (catches the original bug
+    // where the column was left empty and any index access returned undefined).
+    for (let i = 0; i < frameTable.length; i++) {
+      const v = frameTable.originalLocation[i];
+      expect(v === null || v >= 0).toBe(true);
+    }
+    for (let i = 0; i < funcTable.length; i++) {
+      const v = funcTable.originalLocation[i];
+      expect(v === null || v >= 0).toBe(true);
+    }
+  });
+
+  it('should populate empty originalLocation columns on funcTable and frameTable when no symbolication ran', function () {
+    const profileA = getProfileFromTextSamples(`A[file:a.js]`);
+    const profileB = getProfileFromTextSamples(`B[file:b.js]`);
+
+    const profileState = stateFromLocation({
+      pathname: '/public/fakehash1/',
+      search: '?thread=0&v=3',
+      hash: '',
+    });
+
+    const { profile: mergedProfile } = mergeProfilesForDiffing(
+      [profileA.profile, profileB.profile],
+      [profileState, profileState]
+    );
+
+    const { funcTable, frameTable, sourceLocationTable } = mergedProfile.shared;
+
+    // Even without any symbolicated entries on the inputs, the columns must
+    // be filled so downstream checks work.
+    expect(sourceLocationTable.length).toBe(0);
+    expect(funcTable.originalLocation).toHaveLength(funcTable.length);
+    expect(frameTable.originalLocation).toHaveLength(frameTable.length);
+    // No HasOriginalLocation bits should be set on any func.
+    for (let i = 0; i < funcTable.length; i++) {
+      expect(funcTable.flags[i] & FuncFlag.HasOriginalLocation).toBe(0);
+    }
+    // On the frame table, no HasOriginalLocation bits should be set.
+    for (let i = 0; i < frameTable.length; i++) {
+      expect(frameTable.flags[i] & FrameFlag.HasOriginalLocation).toBe(0);
+    }
   });
 });

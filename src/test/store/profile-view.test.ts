@@ -19,9 +19,10 @@ import {
   getThreadWithMarkers,
 } from '../fixtures/profiles/processed-profile';
 import {
+  finishRawSamplesTableBuilder,
   getEmptyThread,
   getEmptyProfile,
-  getEmptySamplesTableWithEventDelay,
+  getRawSamplesTableBuilderWithEventDelay,
 } from '../../profile-logic/data-structures';
 import { withAnalyticsMock } from '../fixtures/mocks/analytics';
 import { getProfileWithNiceTracks } from '../fixtures/profiles/tracks';
@@ -48,15 +49,16 @@ import {
   type BreakdownByCategory,
 } from '../../profile-logic/profile-data';
 import { getSelfAndTotalForCallNode } from '../../profile-logic/call-tree';
+import { checkBit } from '../../utils/bitset';
 
 import type {
   TrackReference,
   Milliseconds,
-  RawThread,
   StartEndRange,
   Marker,
   MixedObject,
   CallNodePath,
+  RawThread,
 } from 'firefox-profiler/types';
 
 describe('call node paths on implementation filter change', function () {
@@ -511,8 +513,8 @@ describe('actions/ProfileView', function () {
             store.getState(),
             memoryTrackReference
           );
-          if (memoryTrack.type !== 'memory') {
-            throw new Error('Expected to get memory track.');
+          if (memoryTrack.type !== 'counter') {
+            throw new Error('Expected to get counter track.');
           }
         }
 
@@ -838,8 +840,8 @@ describe('actions/ProfileView', function () {
         '    - C (total: 1, self: —)',
         '      - D (total: 1, self: 1)',
         '  - E (total: 1, self: 1)',
-        '- D (total: 1, self: 1)',
         '- C (total: 1, self: 1)',
+        '- D (total: 1, self: 1)',
       ]);
     });
 
@@ -919,6 +921,91 @@ describe('actions/ProfileView', function () {
         '      - D (total: 1, self: 1)',
         '- D (total: 1, self: 1)',
       ]);
+    });
+  });
+
+  /**
+   * Covers the bitset returned by `getSearchFilteredFuncMatchesBitSet`, which
+   * the stack chart uses to dim non-matching nodes. The stack filter above
+   * only exercises whether each stack is kept; these tests pin down the
+   * per-func match semantics across name, filename, and library fields, and
+   * the OR semantics when multiple search strings are provided.
+   */
+  describe('getSearchFilteredFuncMatchesBitSet', function () {
+    // Each func's three searchable fields (name, resource/lib, filename) use
+    // distinct prefixes ("fn", "rs", "sc") and a unique per-func index, so
+    // every search string used below appears in exactly one field on exactly
+    // one func. That lets us assert unambiguously which field triggered a
+    // match.
+    function setup() {
+      const {
+        profile,
+        funcNamesPerThread: [funcNames],
+      } = getProfileFromTextSamples(`
+        fn1[lib:rs1][file:sc1]  fn2[lib:rs2][file:sc2]  fn3[lib:rs3][file:sc3]
+        fn4[lib:rs4][file:sc4]
+      `);
+      const { dispatch, getState } = storeWithProfile(profile);
+      return { dispatch, getState, funcNames };
+    }
+
+    function getMatchingFuncNames(
+      getState: () => any,
+      funcNames: string[]
+    ): string[] {
+      const bitSet =
+        selectedThreadSelectors.getSearchFilteredFuncMatchesBitSet(getState());
+      if (bitSet === null) {
+        return [];
+      }
+      const matched: string[] = [];
+      for (let i = 0; i < funcNames.length; i++) {
+        if (checkBit(bitSet, i)) {
+          matched.push(funcNames[i]);
+        }
+      }
+      return matched.sort();
+    }
+
+    it('returns null when there is no active search', function () {
+      const { getState } = setup();
+      expect(
+        selectedThreadSelectors.getSearchFilteredFuncMatchesBitSet(getState())
+      ).toBeNull();
+    });
+
+    it('matches a single func by its name', function () {
+      const { dispatch, getState, funcNames } = setup();
+      dispatch(ProfileView.changeCallTreeSearchString('fn1'));
+      expect(getMatchingFuncNames(getState, funcNames)).toEqual(['fn1']);
+    });
+
+    it('matches a func by its filename', function () {
+      const { dispatch, getState, funcNames } = setup();
+      // sc2 is only set on fn2.
+      dispatch(ProfileView.changeCallTreeSearchString('sc2'));
+      expect(getMatchingFuncNames(getState, funcNames)).toEqual(['fn2']);
+    });
+
+    it('matches a func by its resource/library name', function () {
+      const { dispatch, getState, funcNames } = setup();
+      // rs3 is only set on fn3. Match is case-insensitive.
+      dispatch(ProfileView.changeCallTreeSearchString('RS3'));
+      expect(getMatchingFuncNames(getState, funcNames)).toEqual(['fn3']);
+    });
+
+    it('matches every func matching any of several search strings (OR)', function () {
+      const { dispatch, getState, funcNames } = setup();
+      // "fn1" matches only func fn1; "fn3" matches only func fn3.
+      dispatch(ProfileView.changeCallTreeSearchString('fn1,fn3'));
+      expect(getMatchingFuncNames(getState, funcNames)).toEqual(['fn1', 'fn3']);
+    });
+
+    it('combines matches across different fields with OR', function () {
+      const { dispatch, getState, funcNames } = setup();
+      // "sc1" matches fn1 by filename; "rs4" matches fn4 by lib name.
+      dispatch(ProfileView.changeCallTreeSearchString('sc1,rs4'));
+      expect(getMatchingFuncNames(getState, funcNames)).toEqual(['fn1', 'fn4']);
     });
   });
 
@@ -1627,6 +1714,102 @@ describe('actions/ProfileView', function () {
       });
       expect(UrlStateSelectors.getInvertCallstack(getState())).toEqual(true);
     });
+
+    it('does not apply call tree inversion to the stack chart', function () {
+      const { profile } = getProfileFromTextSamples(`
+        A
+        B
+      `);
+      const { dispatch, getState } = storeWithProfile(profile);
+
+      dispatch(App.changeSelectedTab('calltree'));
+      dispatch(ProfileView.changeInvertCallstack(true));
+      expect(UrlStateSelectors.getInvertCallstack(getState())).toEqual(true);
+      expect(
+        selectedThreadSelectors.getCallNodeInfo(getState()).isInverted()
+      ).toBe(true);
+
+      dispatch(App.changeSelectedTab('stack-chart'));
+      expect(UrlStateSelectors.getInvertCallstack(getState())).toEqual(false);
+      expect(
+        selectedThreadSelectors.getCallNodeInfo(getState()).isInverted()
+      ).toBe(false);
+
+      dispatch(App.changeSelectedTab('calltree'));
+      expect(UrlStateSelectors.getInvertCallstack(getState())).toEqual(true);
+    });
+  });
+
+  describe('changeIncludeIdleSamples', function () {
+    function setup() {
+      // Four samples: two with an Idle leaf, two with a non-idle leaf.
+      const { profile } = getProfileFromTextSamples(`
+        A          A              A          A
+        B[cat:DOM] B[cat:Idle]    B[cat:DOM] B[cat:Idle]
+      `);
+      return storeWithProfile(profile);
+    }
+
+    it('defaults to true and toggles through the reducer', function () {
+      const { dispatch, getState } = setup();
+
+      expect(UrlStateSelectors.getIncludeIdleSamples(getState())).toEqual(true);
+      dispatch(ProfileView.changeIncludeIdleSamples(false));
+      expect(UrlStateSelectors.getIncludeIdleSamples(getState())).toEqual(
+        false
+      );
+    });
+
+    it('nulls out stacks of samples whose leaf frame is idle when off', function () {
+      const { dispatch, getState } = setup();
+
+      const beforeThread =
+        selectedThreadSelectors.getFilteredThread(getState());
+      expect(beforeThread.samples.stack.every((s) => s !== null)).toBe(true);
+
+      dispatch(ProfileView.changeIncludeIdleSamples(false));
+
+      const afterThread = selectedThreadSelectors.getFilteredThread(getState());
+      const idleCategoryIndex = ensureExists(
+        ProfileViewSelectors.getIdleCategoryIndex(getState()),
+        'Expected the test profile to have an Idle category'
+      );
+
+      // Samples 0 and 2 have DOM leaves; 1 and 3 have Idle leaves.
+      expect(afterThread.samples.stack[0]).not.toBe(null);
+      expect(afterThread.samples.stack[1]).toBe(null);
+      expect(afterThread.samples.stack[2]).not.toBe(null);
+      expect(afterThread.samples.stack[3]).toBe(null);
+
+      // The stackTable is untouched. Only sample.stack entries are nulled.
+      expect(afterThread.stackTable).toBe(beforeThread.stackTable);
+      // The kept samples still point at a stack whose category is not idle.
+      const keptStackCategories = afterThread.samples.stack
+        .filter((s): s is number => s !== null)
+        .map((s) => afterThread.stackTable.category[s]);
+      expect(keptStackCategories).not.toContain(idleCategoryIndex);
+    });
+
+    it('is a no-op when the profile has no idle category', function () {
+      const { profile } = getProfileFromTextSamples(`
+        A          A
+        B[cat:DOM] B[cat:DOM]
+      `);
+      // Replace categories with a set that has no "Idle" entry.
+      profile.meta.categories = [
+        { name: 'Other', color: 'grey', subcategories: ['Other'] },
+        { name: 'DOM', color: 'blue', subcategories: ['Other'] },
+      ];
+      const { dispatch, getState } = storeWithProfile(profile);
+
+      expect(ProfileViewSelectors.getIdleCategoryIndex(getState())).toBe(null);
+
+      const before = selectedThreadSelectors.getFilteredThread(getState());
+      dispatch(ProfileView.changeIncludeIdleSamples(false));
+      const after = selectedThreadSelectors.getFilteredThread(getState());
+      // Without an idle category there is nothing to filter.
+      expect(after).toBe(before);
+    });
   });
 
   describe('updatePreviewSelection', function () {
@@ -1785,6 +1968,26 @@ describe('actions/ProfileView', function () {
       });
     });
 
+    it.each([0, 2])(
+      'pops committed ranges from index %s without setting a preview selection',
+      function (firstPoppedFilterIndex) {
+        const { getState, dispatch } = setupStore();
+        dispatch(
+          ProfileView.updatePreviewSelection({
+            isModifying: false,
+            selectionStart: 1,
+            selectionEnd: 9,
+          })
+        );
+
+        dispatch(ProfileView.popCommittedRanges(firstPoppedFilterIndex, false));
+        expect(
+          UrlStateSelectors.getAllCommittedRanges(getState())
+        ).toHaveLength(firstPoppedFilterIndex);
+        expect(ProfileViewSelectors.getPreviewSelection(getState())).toBe(null);
+      }
+    );
+
     it('unsets the selection when popping the current committed range', function () {
       const { getState, dispatch } = setupStore();
       expect(UrlStateSelectors.getAllCommittedRanges(getState())).toEqual([
@@ -1884,22 +2087,26 @@ describe('actions/ProfileView', function () {
     });
   });
 
-  describe('getRangeFilteredScreenshotsById', function () {
+  describe('getRangeFilteredScreenshotsByName', function () {
     it('can extract some screenshot markers', function () {
       const profile = getScreenshotTrackProfile();
       const { getState } = storeWithProfile(profile);
-      const screenshotMarkersById =
-        selectedThreadSelectors.getRangeFilteredScreenshotsById(getState());
-      const keys = [...screenshotMarkersById.keys()];
+      const screenshotMarkersByName =
+        selectedThreadSelectors.getRangeFilteredScreenshotsByName(getState());
+      const keys = [...screenshotMarkersByName.keys()];
       expect(keys.length).toEqual(3);
 
-      const screenshots = screenshotMarkersById.get('0');
+      const screenshots = screenshotMarkersByName.get('CompositorScreenshot 0');
       expect(screenshots?.length).toEqual(5);
       for (const screenshot of screenshots ?? []) {
-        expect(screenshot.name).toEqual('CompositorScreenshot');
+        expect(screenshot.name).toEqual('CompositorScreenshot 0');
       }
-      expect(screenshotMarkersById.get('1')?.length).toEqual(6);
-      expect(screenshotMarkersById.get('2')?.length).toEqual(10);
+      expect(
+        screenshotMarkersByName.get('CompositorScreenshot 1')?.length
+      ).toEqual(5);
+      expect(
+        screenshotMarkersByName.get('CompositorScreenshot 2')?.length
+      ).toEqual(10);
     });
 
     it('filters screenshots within a range selection', function () {
@@ -1907,15 +2114,15 @@ describe('actions/ProfileView', function () {
       const [{ markers }] = profile.threads;
       const { dispatch, getState } = storeWithProfile(profile);
 
-      // Double check that there are 21 markers in the test data, and commit a
+      // Double check that there are 38 raw markers in the test data, and commit a
       // subsection of that range.
-      expect(markers.length).toBe(21);
+      expect(markers.length).toBe(38);
       dispatch(ProfileView.commitRange(3.1, 7.5));
 
       // Get out the markers.
-      const screenshotMarkersById =
-        selectedThreadSelectors.getRangeFilteredScreenshotsById(getState());
-      const screenshots = screenshotMarkersById.get('2');
+      const screenshotMarkersByName =
+        selectedThreadSelectors.getRangeFilteredScreenshotsByName(getState());
+      const screenshots = screenshotMarkersByName.get('CompositorScreenshot 2');
       if (!screenshots) {
         throw new Error('No screenshots found.');
       }
@@ -2227,9 +2434,13 @@ describe('snapshots of selectors/profile', function () {
 
   it('matches the last stored run of selectedThreadSelector.getFlameGraphTiming', function () {
     const { getState } = setupStore();
-    expect(
-      selectedThreadSelectors.getFlameGraphTiming(getState())
-    ).toMatchSnapshot();
+    const timing = selectedThreadSelectors.getFlameGraphTiming(getState());
+    // Build a plain shape with the flame graph timing contents, so that the
+    // snapshot doesn't contain the class name / class fields.
+    const plainTiming = {
+      rows: timing.getAllRowsForTesting(),
+    };
+    expect(plainTiming).toMatchSnapshot();
   });
 
   it('matches the last stored run of selectedThreadSelector.getFriendlyThreadName', function () {
@@ -2318,7 +2529,7 @@ describe('changeSelectedCallNode', function () {
     );
 
     dispatch(App.changeSelectedTab('flame-graph'));
-    // In the flame graph, everything should still be non-inverted.
+    // In the flame graph, the invert state is independent and defaults to false.
     expect(UrlStateSelectors.getInvertCallstack(getState())).toEqual(false);
     // The original non-inverted selected call node should be selected.
     expect(selectedThreadSelectors.getSelectedCallNodePath(getState())).toEqual(
@@ -2431,6 +2642,7 @@ describe('getTimingsForSidebar', () => {
       };
       expect(timings).toEqual({
         forPath: expectedTiming,
+        isInvertedRoot: false,
         rootTime: 5,
       });
     });
@@ -2476,6 +2688,7 @@ describe('getTimingsForSidebar', () => {
             ]),
           },
         },
+        isInvertedRoot: false,
         rootTime: 5,
       });
     });
@@ -2522,6 +2735,7 @@ describe('getTimingsForSidebar', () => {
 
       expect(timings).toEqual({
         forPath: expectedTiming,
+        isInvertedRoot: false,
         rootTime: 5,
       });
     });
@@ -2600,6 +2814,7 @@ describe('getTimingsForSidebar', () => {
         };
         expect(timings).toEqual({
           forPath: expectedTiming,
+          isInvertedRoot: false,
           rootTime: 4,
         });
       });
@@ -2642,6 +2857,7 @@ describe('getTimingsForSidebar', () => {
         };
         expect(timings).toEqual({
           forPath: expectedTiming,
+          isInvertedRoot: false,
           rootTime: 4,
         });
       });
@@ -2673,6 +2889,7 @@ describe('getTimingsForSidebar', () => {
         };
         expect(timings).toEqual({
           forPath: { selfTime: expectedTiming, totalTime: expectedTiming },
+          isInvertedRoot: false,
           rootTime: 4,
         });
       });
@@ -2715,6 +2932,7 @@ describe('getTimingsForSidebar', () => {
         };
         expect(timings).toEqual({
           forPath: expectedTiming,
+          isInvertedRoot: false,
           rootTime: 4,
         });
       });
@@ -2746,6 +2964,7 @@ describe('getTimingsForSidebar', () => {
         };
         expect(timings).toEqual({
           forPath: { selfTime: expectedTiming, totalTime: expectedTiming },
+          isInvertedRoot: false,
           rootTime: 4,
         });
       });
@@ -2792,15 +3011,11 @@ describe('getTimingsForSidebar', () => {
       };
       expect(timings).toEqual({
         forPath: {
-          selfTime: {
-            // Inverted trees have an empty breakdown for the selftime because
-            // it's always the same values as for totaltime, or 0. For a root
-            // node, the value is non-0 though.
-            ...EMPTY_TIMING,
-            value: 3,
-          },
+          // For inverted root nodes, selfTime === totalTime.
+          selfTime: expectedTiming,
           totalTime: expectedTiming,
         },
+        isInvertedRoot: true,
         rootTime: 5,
       });
     });
@@ -2828,6 +3043,7 @@ describe('getTimingsForSidebar', () => {
             ]),
           },
         },
+        isInvertedRoot: false,
         rootTime: 5,
       });
     });
@@ -2839,24 +3055,27 @@ describe('getTimingsForSidebar', () => {
       } = setupForInvertedTree();
 
       // Select the function as a root node
+      const expectedRootTiming = {
+        value: 1,
+        breakdownByCategory: withSingleSubcategory([
+          0,
+          0,
+          1, // Layout
+          0,
+          0,
+          0,
+          0,
+          0,
+        ]),
+      };
       let timings = getTimingsForPath([H]);
       expect(timings).toEqual({
         forPath: {
-          selfTime: { ...EMPTY_TIMING, value: 1 },
-          totalTime: {
-            value: 1,
-            breakdownByCategory: withSingleSubcategory([
-              0,
-              0,
-              1, // Layout
-              0,
-              0,
-              0,
-              0,
-              0,
-            ]),
-          },
+          // For inverted root nodes, selfTime === totalTime.
+          selfTime: expectedRootTiming,
+          totalTime: expectedRootTiming,
         },
+        isInvertedRoot: true,
         rootTime: 5,
       });
 
@@ -2879,6 +3098,7 @@ describe('getTimingsForSidebar', () => {
             ]),
           },
         },
+        isInvertedRoot: false,
         rootTime: 5,
       });
     });
@@ -2906,6 +3126,7 @@ describe('getTimingsForSidebar', () => {
             ]),
           },
         },
+        isInvertedRoot: false,
         rootTime: 5,
       });
     });
@@ -2991,15 +3212,11 @@ describe('getTimingsForSidebar', () => {
         };
         expect(timings).toEqual({
           forPath: {
-            selfTime: {
-              // selftime breakdowns are always empty for inverted trees because
-              // they're the same than the total time.
-              ...EMPTY_TIMING,
-              // But root nodes have self time value of course!
-              value: 1,
-            },
+            // For inverted root nodes, selfTime === totalTime.
+            selfTime: expectedTiming,
             totalTime: expectedTiming,
           },
+          isInvertedRoot: true,
           rootTime: 4,
         });
       });
@@ -3031,15 +3248,11 @@ describe('getTimingsForSidebar', () => {
         };
         expect(timings).toEqual({
           forPath: {
-            selfTime: {
-              // selftime breakdowns are always empty for inverted trees because
-              // they're the same than the total time.
-              ...EMPTY_TIMING,
-              // But root nodes have a selftime value
-              value: 1,
-            },
+            // For inverted root nodes, selfTime === totalTime.
+            selfTime: expectedTiming,
             totalTime: expectedTiming,
           },
+          isInvertedRoot: true,
           rootTime: 4,
         });
       });
@@ -3069,6 +3282,7 @@ describe('getTimingsForSidebar', () => {
               ]),
             },
           },
+          isInvertedRoot: false,
           rootTime: 4,
         });
       });
@@ -3662,7 +3876,7 @@ describe('getProcessedEventDelays', function () {
     const profile = getEmptyProfile();
 
     // Create event delay values.
-    const samples = getEmptySamplesTableWithEventDelay();
+    const samples = getRawSamplesTableBuilderWithEventDelay();
     if (eventDelay) {
       samples.eventDelay = eventDelay;
     } else {
@@ -3680,7 +3894,9 @@ describe('getProcessedEventDelays', function () {
       .fill(0)
       .map((_, i) => i);
     samples.stack = Array(samples.length).fill(null);
-    profile.threads.push(getEmptyThread({ samples }));
+    profile.threads.push(
+      getEmptyThread({ samples: finishRawSamplesTableBuilder(samples) })
+    );
 
     const { dispatch, getState } = storeWithProfile(profile);
 
@@ -3869,12 +4085,14 @@ describe('timeline type', function () {
     );
   });
 
-  it('should use the category view when cpu is not provided', () => {
+  it('should use the cpu-category view even if no cpu is provided', () => {
     const { profile } = getProfileFromTextSamples('A');
 
     // Load the store after mutating the profile.
     const { getState } = storeWithProfile(profile);
-    expect(UrlStateSelectors.getTimelineType(getState())).toEqual('category');
+    expect(UrlStateSelectors.getTimelineType(getState())).toEqual(
+      'cpu-category'
+    );
   });
 
   it('should use the stack height view when category and cpu is not provided', () => {

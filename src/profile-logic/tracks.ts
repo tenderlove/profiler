@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 import type {
-  ScreenshotPayload,
   Profile,
   RawProfileSharedData,
   RawThread,
@@ -10,8 +9,10 @@ import type {
   Pid,
   GlobalTrack,
   LocalTrack,
+  Track,
   TrackIndex,
   RawCounter,
+  CounterIndex,
   Tid,
   TrackReference,
   TabID,
@@ -20,11 +21,16 @@ import type {
 import {
   getFriendlyThreadName,
   computeStackTableFromRawStackTable,
+  computeFrameTableFromRawFrameTable,
 } from './profile-data';
+import {
+  computeCombinedMarkerSchemaList,
+  getMarkerTypesForDisplay,
+} from './marker-data';
 import { intersectSets, subtractSets } from '../utils/set';
-import { StringTable } from '../utils/string-table';
 import { splitSearchString, stringsToRegExp } from '../utils/string';
 import { ensureExists, assertExhaustiveCheck } from '../utils/types';
+import { INTERVAL_END } from '../app-logic/constants';
 
 export type TracksWithOrder = {
   readonly globalTracks: GlobalTrack[];
@@ -56,28 +62,22 @@ export type HiddenTracks = {
 const LOCAL_TRACK_INDEX_ORDER = {
   thread: 0,
   network: 1,
-  memory: 2,
+  counter: 2,
   ipc: 3,
   'event-delay': 4,
-  'process-cpu': 5,
-  power: 6,
-  marker: 7,
-  bandwidth: 8,
+  marker: 5,
 };
 const LOCAL_TRACK_DISPLAY_ORDER = {
   network: 0,
-  bandwidth: 1,
-  memory: 2,
-  power: 3,
+  counter: 1,
   // IPC tracks that belong to the global track will appear right after network
   // and counter tracks. But we want to show the IPC tracks that belong to the
   // local threads right after their track. This special handling happens inside
   // the sort function.
-  ipc: 4,
-  thread: 5,
-  'event-delay': 6,
-  'process-cpu': 7,
-  marker: 8,
+  ipc: 2,
+  thread: 3,
+  'event-delay': 4,
+  marker: 5,
 };
 
 const GLOBAL_TRACK_INDEX_ORDER = {
@@ -103,6 +103,27 @@ function _getDefaultLocalTrackOrder(
   const naturalSort = new Intl.Collator('en-US', { numeric: true });
   // In place sort!
   trackOrder.sort((a, b) => {
+    // Tie-break between two counter tracks using their display.sortWeight.
+    // Cross-type ordering is handled below by LOCAL_TRACK_DISPLAY_ORDER.
+    if (
+      tracks[a].type === 'counter' &&
+      tracks[b].type === 'counter' &&
+      profile &&
+      profile.counters
+    ) {
+      if (profile.meta.keepProfileThreadOrder) {
+        return tracks[a].counterIndex - tracks[b].counterIndex;
+      }
+      const counterA = profile.counters[tracks[a].counterIndex];
+      const counterB = profile.counters[tracks[b].counterIndex];
+      const sortWeightDiff =
+        counterA.display.sortWeight - counterB.display.sortWeight;
+      if (sortWeightDiff !== 0) {
+        return sortWeightDiff;
+      }
+      return naturalSort.compare(counterA.name, counterB.name);
+    }
+
     if (
       tracks[a].type === 'thread' &&
       tracks[b].type === 'ipc' &&
@@ -121,22 +142,6 @@ function _getDefaultLocalTrackOrder(
       // If the IPC track belongs to that local thread, put the IPC tracks right
       // after it.
       return 1;
-    }
-
-    if (
-      profile &&
-      profile.counters &&
-      tracks[a].type === 'power' &&
-      tracks[b].type === 'power'
-    ) {
-      const idxA = tracks[a].counterIndex;
-      const idxB = tracks[b].counterIndex;
-      if (profile.meta.keepProfileThreadOrder) {
-        return idxA - idxB;
-      }
-      const nameA = profile.counters[idxA].name;
-      const nameB = profile.counters[idxB].name;
-      return naturalSort.compare(nameA, nameB);
     }
 
     // If the tracks are both threads, sort them by thread name, and then by
@@ -322,8 +327,19 @@ export function computeLocalTracksByPid(
   }
 
   // find markers that might have their own track.
-  const markerSchemasWithGraphs = (profile.meta.markerSchema || []).filter(
+  const markerSchema = computeCombinedMarkerSchemaList(
+    profile.meta.markerSchema || []
+  );
+  const markerSchemasWithGraphs = markerSchema.filter(
     (schema) => Array.isArray(schema.graphs) && schema.graphs.length > 0
+  );
+  const ipcTimelineMarkerTypes = getMarkerTypesForDisplay(
+    markerSchema,
+    'timeline-ipc'
+  );
+  const networkTimelineMarkerTypes = getMarkerTypesForDisplay(
+    markerSchema,
+    'timeline-network'
   );
 
   for (
@@ -349,12 +365,20 @@ export function computeLocalTracksByPid(
       tracks.push({ type: 'thread', threadIndex });
     }
 
-    if (markers.data.some((datum) => datum && datum.type === 'Network')) {
+    if (
+      markers.data.some(
+        (datum) => datum && networkTimelineMarkerTypes.has(datum.type)
+      )
+    ) {
       // This thread has network markers.
       tracks.push({ type: 'network', threadIndex });
     }
 
-    if (markers.data.some((datum) => datum && datum.type === 'IPC')) {
+    if (
+      markers.data.some(
+        (datum) => datum && ipcTimelineMarkerTypes.has(datum.type)
+      )
+    ) {
       // This thread has IPC markers.
       tracks.push({ type: 'ipc', threadIndex });
     }
@@ -400,30 +424,24 @@ export function computeLocalTracksByPid(
   const { counters } = profile;
   if (counters) {
     for (let counterIndex = 0; counterIndex < counters.length; counterIndex++) {
-      const { pid, category, samples } = counters[counterIndex];
+      const { pid, category, name } = counters[counterIndex];
       if (!availablePids.has(pid)) {
         // If the global track is filtered out ignore it here too.
         continue;
       }
 
-      if (['Memory', 'power', 'Bandwidth'].includes(category)) {
-        if (category === 'power' && samples.length <= 2) {
-          // If we have only 2 samples, they are likely both 0 and we don't have a real counter.
-          continue;
-        }
-        let tracks = localTracksByPid.get(pid);
-        if (tracks === undefined) {
-          tracks = [];
-          localTracksByPid.set(pid, tracks);
-        }
-        if (category === 'Memory') {
-          tracks.push({ type: 'memory', counterIndex });
-        } else if (category === 'Bandwidth') {
-          tracks.push({ type: 'bandwidth', counterIndex });
-        } else {
-          tracks.push({ type: 'power', counterIndex });
-        }
+      // Skip processCPU counters — they are added separately by
+      // addProcessCPUTracksForProcess when the experimental flag is enabled.
+      if (category === 'CPU' && name === 'processCPU') {
+        continue;
       }
+
+      let tracks = localTracksByPid.get(pid);
+      if (tracks === undefined) {
+        tracks = [];
+        localTracksByPid.set(pid, tracks);
+      }
+      tracks.push({ type: 'counter', counterIndex });
     }
   }
 
@@ -496,11 +514,186 @@ export function addProcessCPUTracksForProcess(
     let localTracks = newLocalTracksByPid.get(pid) ?? [];
 
     // Do not mutate the current state.
-    localTracks = [...localTracks, { type: 'process-cpu', counterIndex }];
+    localTracks = [...localTracks, { type: 'counter', counterIndex }];
     newLocalTracksByPid.set(pid, localTracks);
   }
 
   return newLocalTracksByPid;
+}
+
+/**
+ * Decode an `oldXToNewXPlusOne` entry. The 0 sentinel means the source
+ * index was removed during sanitization.
+ */
+function _translatePlusOne(
+  plusOne: Int32Array | null,
+  oldIndex: number
+): number | undefined {
+  if (plusOne === null) {
+    return oldIndex;
+  }
+  const stored = plusOne[oldIndex];
+  return stored === 0 ? undefined : stored - 1;
+}
+
+/**
+ * Build an identity key for a track based on properties that survive
+ * sanitization. When a translation map is provided for the dimension a track
+ * keys on, the source-side index is normalized through it; a missing entry
+ * means the track was removed and the key is null.
+ */
+function _trackIdentityKey(
+  track: Track,
+  threadIndexTranslation: Map<ThreadIndex, ThreadIndex> | null,
+  counterIndexTranslation: Map<CounterIndex, CounterIndex> | null,
+  stringIndexTranslation: Int32Array | null
+): string | null {
+  switch (track.type) {
+    case 'process':
+      return `process:${track.pid}`;
+    case 'screenshots':
+      return `screenshots:${track.markerName}`;
+    case 'visual-progress':
+    case 'perceptual-visual-progress':
+    case 'contentful-visual-progress':
+      return track.type;
+    case 'thread':
+    case 'network':
+    case 'ipc':
+    case 'event-delay': {
+      const threadIndex =
+        threadIndexTranslation === null
+          ? track.threadIndex
+          : threadIndexTranslation.get(track.threadIndex);
+      if (threadIndex === undefined) {
+        return null;
+      }
+      return `${track.type}:${threadIndex}`;
+    }
+    case 'counter': {
+      const counterIndex =
+        counterIndexTranslation === null
+          ? track.counterIndex
+          : counterIndexTranslation.get(track.counterIndex);
+      if (counterIndex === undefined) {
+        return null;
+      }
+      return `counter:${counterIndex}`;
+    }
+    case 'marker': {
+      const threadIndex =
+        threadIndexTranslation === null
+          ? track.threadIndex
+          : threadIndexTranslation.get(track.threadIndex);
+      if (threadIndex === undefined) {
+        return null;
+      }
+      const markerName = _translatePlusOne(
+        stringIndexTranslation,
+        track.markerName
+      );
+      if (markerName === undefined) {
+        return null;
+      }
+      return `marker:${threadIndex}:${track.markerSchema.name}:${markerName}`;
+    }
+    default:
+      throw assertExhaustiveCheck(track, 'Unhandled Track type.');
+  }
+}
+
+/**
+ * Map each old TrackIndex to its new TrackIndex when both old and new track
+ * lists describe the same profile across a sanitization step. Tracks are
+ * matched by stable identity (pid, screenshot marker name, threadIndex, counterIndex,
+ * visual-progress singleton, or marker schema name plus marker name string);
+ * old-side thread, counter, and string-table indexes are normalized through
+ * the supplied translation maps before comparison. Tracks with no match in
+ * `newTracks` are absent from the result.
+ */
+export function computeOldTrackIndexToNewTrackIndexMap({
+  oldTracks,
+  newTracks,
+  oldThreadIndexToNew,
+  oldCounterIndexToNew,
+  oldStringToNewStringPlusOne,
+}: {
+  readonly oldTracks: ReadonlyArray<Track>;
+  readonly newTracks: ReadonlyArray<Track>;
+  readonly oldThreadIndexToNew: Map<ThreadIndex, ThreadIndex> | null;
+  readonly oldCounterIndexToNew: Map<CounterIndex, CounterIndex> | null;
+  readonly oldStringToNewStringPlusOne: Int32Array | null;
+}): Map<TrackIndex, TrackIndex> {
+  const newKeyToTrackIndex = new Map<string, TrackIndex>();
+  for (let i = 0; i < newTracks.length; i++) {
+    const key = _trackIdentityKey(newTracks[i], null, null, null);
+    if (key !== null) {
+      newKeyToTrackIndex.set(key, i);
+    }
+  }
+
+  const oldTrackIndexToNewTrackIndex = new Map<TrackIndex, TrackIndex>();
+  for (let i = 0; i < oldTracks.length; i++) {
+    const key = _trackIdentityKey(
+      oldTracks[i],
+      oldThreadIndexToNew,
+      oldCounterIndexToNew,
+      oldStringToNewStringPlusOne
+    );
+    if (key === null) {
+      continue;
+    }
+    const newIndex = newKeyToTrackIndex.get(key);
+    if (newIndex !== undefined) {
+      oldTrackIndexToNewTrackIndex.set(i, newIndex);
+    }
+  }
+
+  return oldTrackIndexToNewTrackIndex;
+}
+
+/**
+ * Translate a Set of hidden track indexes from old to new track-index space.
+ * Hidden tracks whose old index has no match in the new track list are dropped.
+ */
+export function computeHiddenTracksAfterSanitization({
+  oldHiddenTracks,
+  oldTrackIndexToNewTrackIndex,
+}: {
+  readonly oldHiddenTracks: ReadonlySet<TrackIndex>;
+  readonly oldTrackIndexToNewTrackIndex: Map<TrackIndex, TrackIndex>;
+}): Set<TrackIndex> {
+  const newHiddenTracks = new Set<TrackIndex>();
+  for (const oldIndex of oldHiddenTracks) {
+    const newIndex = oldTrackIndexToNewTrackIndex.get(oldIndex);
+    if (newIndex !== undefined) {
+      newHiddenTracks.add(newIndex);
+    }
+  }
+  return newHiddenTracks;
+}
+
+/**
+ * Translate a track-order array from old to new track-index space, preserving
+ * relative order. Indexes with no match in the new track list are dropped;
+ * `initializeGlobalTrackOrder` / `initializeLocalTrackOrderByPid` append any
+ * new tracks not represented in the input order.
+ */
+export function computeTrackOrderAfterSanitization({
+  oldTrackOrder,
+  oldTrackIndexToNewTrackIndex,
+}: {
+  readonly oldTrackOrder: ReadonlyArray<TrackIndex>;
+  readonly oldTrackIndexToNewTrackIndex: Map<TrackIndex, TrackIndex>;
+}): TrackIndex[] {
+  const newTrackOrder: TrackIndex[] = [];
+  for (const oldIndex of oldTrackOrder) {
+    const newIndex = oldTrackIndexToNewTrackIndex.get(oldIndex);
+    if (newIndex !== undefined) {
+      newTrackOrder.push(newIndex);
+    }
+  }
+  return newTrackOrder;
 }
 
 /**
@@ -521,14 +714,15 @@ export function computeGlobalTracks(
   };
   const globalTracksByPid: Map<Pid, ProcessTrack> = new Map();
   let globalTracks: GlobalTrack[] = [];
+  const markerSchema = computeCombinedMarkerSchemaList(
+    profile.meta.markerSchema || []
+  );
+  const screenshotTimelineMarkerTypes = getMarkerTypesForDisplay(
+    markerSchema,
+    'timeline-screenshots'
+  );
 
   // Create the global tracks.
-  const { stringArray } = profile.shared;
-  const stringTable = StringTable.withBackingArray(stringArray);
-  const screenshotNameIndex = stringTable.hasString('CompositorScreenshot')
-    ? stringTable.indexForString('CompositorScreenshot')
-    : null;
-
   for (
     let threadIndex = 0;
     threadIndex < profile.threads.length;
@@ -568,20 +762,23 @@ export function computeGlobalTracks(
       }
     }
 
-    // Check for screenshots.
-    const ids: Set<string> = new Set();
-    if (screenshotNameIndex !== null) {
-      for (let markerIndex = 0; markerIndex < markers.length; markerIndex++) {
-        if (markers.name[markerIndex] === screenshotNameIndex) {
-          // Coerce the payload to a screenshot one. Don't do a runtime check that
-          // this is correct.
-          const data = markers.data[markerIndex] as ScreenshotPayload;
-          ids.add(data.windowID);
-        }
+    // Windows must keep being added in the order their first screenshot was taken:
+    // shared URLs refer to global tracks by index,
+    // so a different order would change what an existing URL selects.
+    const markerNames: Set<string> = new Set();
+    for (let markerIndex = 0; markerIndex < markers.length; markerIndex++) {
+      const data = markers.data[markerIndex];
+      if (
+        markers.phase[markerIndex] === INTERVAL_END ||
+        data === null ||
+        !screenshotTimelineMarkerTypes.has(data.type)
+      ) {
+        continue;
       }
-      for (const id of ids) {
-        globalTracks.push({ type: 'screenshots', id, threadIndex });
-      }
+      markerNames.add(profile.shared.stringArray[markers.name[markerIndex]]);
+    }
+    for (const markerName of markerNames) {
+      globalTracks.push({ type: 'screenshots', markerName, threadIndex });
     }
   }
 
@@ -666,7 +863,8 @@ function filterGlobalTracksByTab(
       // Always include the screenshots.
       case 'screenshots':
       // Also always add the visual progress tracks without looking at the tab
-      // filter. (fallthrough)
+      // filter.
+      // falls through
       case 'visual-progress':
       case 'perceptual-visual-progress':
       case 'contentful-visual-progress':
@@ -1116,10 +1314,10 @@ export function getLocalTrackName(
       return getFriendlyThreadName(threads, threads[localTrack.threadIndex]);
     case 'network':
       return 'Network';
-    case 'memory':
-      return 'Memory';
-    case 'bandwidth':
-      return 'Bandwidth';
+    case 'counter': {
+      const counter = counters[localTrack.counterIndex];
+      return counter.display.label || counter.name;
+    }
     case 'ipc':
       return `IPC — ${getFriendlyThreadName(
         threads,
@@ -1130,10 +1328,6 @@ export function getLocalTrackName(
         getFriendlyThreadName(threads, threads[localTrack.threadIndex]) +
         ' Event Delay'
       );
-    case 'process-cpu':
-      return 'Process CPU';
-    case 'power':
-      return counters[localTrack.counterIndex].name;
     case 'marker':
       return shared.stringArray[localTrack.markerName];
     default:
@@ -1382,7 +1576,8 @@ function _computeThreadSampleScore(
     : -1;
   const derivedStackTable = computeStackTableFromRawStackTable(
     stackTable,
-    frameTable,
+    computeFrameTableFromRawFrameTable(frameTable, meta.categories),
+    meta.categories,
     defaultCategory
   );
   const nonIdleSampleCount = samples.stack.filter(
@@ -1576,14 +1771,18 @@ export function getSearchFilteredLocalTracksByPid(
           }
           break;
         }
+        case 'counter': {
+          const trackName = localTrackNames[trackIndex];
+          if (searchRegExp.test(trackName)) {
+            searchFilteredLocalTracks.add(trackIndex);
+            continue;
+          }
+          break;
+        }
         case 'network':
-        case 'memory':
-        case 'bandwidth':
         case 'marker':
         case 'ipc':
-        case 'event-delay':
-        case 'power':
-        case 'process-cpu': {
+        case 'event-delay': {
           const { type } = localTrack;
           if (searchRegExp.test(type)) {
             searchFilteredLocalTracks.add(trackIndex);
@@ -1761,7 +1960,8 @@ export function getTrackReferenceFromThreadIndex(
  * of them can be hidden to reduce the noise. This mostly depends on either the
  * usefulness or the activity of that track.
  *
- * TODO: Check the memory track activity here to decide if it should be visible.
+ * TODO: Check the counter track activity here to decide if it should be visible,
+ *   see https://github.com/firefox-devtools/profiler/issues/5967.
  */
 function _isLocalTrackVisible(
   localTrack: LocalTrack,
@@ -1773,15 +1973,11 @@ function _isLocalTrackVisible(
       return visibleThreadIndexes.has(localTrack.threadIndex);
     case 'marker':
     case 'network':
-    case 'memory':
-    case 'bandwidth':
-    // 'event-delay' and 'process-cpu' tracks are experimental and they should
-    // be visible by default whenever they are included in a profile. (fallthrough)
+    case 'counter':
+    // 'event-delay' track is experimental, and it should be visible by default
+    // whenever it is included in a profile.
+    // falls through
     case 'event-delay':
-    case 'process-cpu':
-    // Power tracks are there only if the power feature is enabled. So they should
-    // be visible by default whenever they're included in a profile. (fallthrough)
-    case 'power':
       // Keep non-thread local tracks visible.
       return true;
     case 'ipc':

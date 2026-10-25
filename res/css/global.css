@@ -8,13 +8,14 @@
    * ===================== */
   --z-tab-selected: 1;
   --z-warning: 4;
-  --z-root: 0;
+  --z-tooltip: 4;
   --z-bottom-box: 1;
   --z-serviceworker-notice: 4;
   --z-arrow-panel: 5;
   --z-copy-table-warning: 4;
   --z-tree-view: 0;
   --z-tree-view-inner: 2;
+  --z-tree-view-header-divider: 1;
   --z-overflow-edge-indicator: 3;
   --z-chart-viewport-expanded: 1;
   --z-timeline-selection: 1;
@@ -91,6 +92,7 @@
   --comment-node-color: #5c5c5f;
 
   color: var(--base-foreground-color);
+  color-scheme: light;
 }
 
 :root.dark-mode {
@@ -153,10 +155,6 @@ a:visited {
   color: var(--link-visited-foreground-color);
 }
 
-a:active {
-  color: var(--link-active-foreground-color);
-}
-
 /**
  * This class should be used to create a small colored square. It's used
  * especially for categories and network mime types.
@@ -183,16 +181,4 @@ a:active {
 
 .colored-border.ellipsis {
   opacity: 0;
-}
-
-.splitter-layout.splitter-layout > .layout-splitter {
-  background-color: var(--wide-splitter-color);
-}
-
-.splitter-layout.splitter-layout > .layout-splitter:hover {
-  background-color: var(--wide-splitter-hover-color);
-}
-
-.splitter-layout.splitter-layout.layout-changing > .layout-splitter {
-  background-color: var(--wide-splitter-pressed-color);
 }

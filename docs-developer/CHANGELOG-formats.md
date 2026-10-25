@@ -2,9 +2,199 @@
 
 This file documents all changes in the profiler gecko and processed formats.
 
-Note that this is not an exhaustive list. Processed profile format upgraders can be found in [processed-profile-versioning.jt](../src/profile-logic/processed-profile-versioning.ts) and gecko profile format upgraders can be found in [gecko-profile-versioning.jt](../src/profile-logic/gecko-profile-versioning.ts). Please refer to them for older upgraders or for exact implementations.
+Note that this is not an exhaustive list. Processed profile format upgraders can be found in [processed-profile-versioning.ts](../src/profile-logic/processed-profile-versioning.ts) and gecko profile format upgraders can be found in [gecko-profile-versioning.ts](../src/profile-logic/gecko-profile-versioning.ts). Please refer to them for older upgraders or for exact implementations.
 
 ## Processed profile format
+
+### Version 76
+
+The `CompositorScreenshot` marker payload's `windowWidth` and `windowHeight` fields were replaced with a single `windowSize` field of the form `{ width, height }`. The `windowID` field is now always a string.
+
+These markers are now stored as pairs of start and end markers instead of instant markers. The window ID is part of the marker name (`CompositorScreenshot <windowID>`), so starts and ends are matched by name like any other marker pair. The `CompositorScreenshotWindowDestroyed` marker is gone: it is now the end marker of that window's last screenshot. The last screenshot of a window that is never destroyed has no end marker, and is extended to the end of the thread.
+
+Two marker schema field formats were added to describe these markers: `screenshot-size`, whose value is a `{ width, height }` object, and `screenshot-data-url`, an object format `{ type: "screenshot-data-url", sizeFieldForAspectRatio }` whose value is a string table index holding an image data URL.
+
+A new marker schema display location, `timeline-screenshots`, was added. Markers in this location create Screenshot tracks and are grouped by marker name. Markers for the same window must use the same name, and markers for different windows must use different names.
+
+### Version 75
+
+The func table (`profile.shared.funcTable`) representation changed, mirroring the v71 frame table change:
+
+- A new `flags` bitfield column was added. It can be stored as a plain array of numbers or as a `Uint8Array` (for profiles loaded from [JsonSlabs](https://github.com/mstange/json-slabs/) files). The bits are:
+  - `1 << 0` — `IsJS`: this func is a JavaScript function.
+  - `1 << 1` — `RelevantForJS`: this func should be treated as "relevant for JS" (e.g. DOM API label funcs).
+  - `1 << 2` — `HasResource`: `resource[i]` is meaningful.
+  - `1 << 3` — `HasSource`: `source[i]` is meaningful.
+  - `1 << 4` — `HasLine`: `lineNumber[i]` is meaningful.
+  - `1 << 5` — `HasColumn`: `columnNumber[i]` is meaningful.
+  - `1 << 6` — `HasOriginalLocation`: `originalLocation[i]` is meaningful.
+- The `isJS` and `relevantForJS` boolean columns were removed; the `IsJS` and `RelevantForJS` flag bits carry that information.
+- The `resource`, `source`, `lineNumber`, `columnNumber`, and `originalLocation` columns are no longer nullable in-band. Each may still be stored as a plain array, but the values are always numbers, and when the corresponding "Has..." flag is unset, the value in the column is ignored (producers typically write `0`).
+- The following columns can now optionally be stored as typed arrays:
+  - `name` (`Int32Array`)
+  - `resource` (`Int32Array`)
+  - `source` (`Int32Array`)
+  - `lineNumber` (`Int32Array`)
+  - `columnNumber` (`Int32Array`)
+  - `originalLocation` (`Int32Array`)
+
+### Version 74
+
+The columns of the native symbol table (`profile.shared.nativeSymbols`) can now optionally be stored as typed arrays, for profiles loaded from [JsonSlabs](https://github.com/mstange/json-slabs/) files (.jslb, .jslb.gz). Regular JS / JSON arrays are still accepted.
+
+The "function size not known" sentinel value has changed from `null` to `-1` in both representations (JSON and JSLB).
+
+The column types are as follows:
+
+- `libIndex` (`Int32Array`)
+- `address` (`Uint32Array`)
+- `name` (`Int32Array`)
+- `functionSize` (`Int32Array`)
+
+### Version 73
+
+FileIO marker schemas now have a `tableLabel`.
+
+### Version 72
+
+Marker schema fields can now include a `containsPII` array describing the categories of privacy-sensitive data they contain. Profile sanitization uses these categories instead of identifying privacy-sensitive fields from the marker type. Extension-related text markers are converted to structured payloads so their extension IDs can be annotated separately.
+
+### Version 71
+
+The frame table (`profile.shared.frameTable`) representation changed in such a way that all its columns can now be typed arrays when using [JsonSlabs](https://github.com/mstange/json-slabs/) profiles.
+
+What's different from the other tables is that the frame table uses flag bits rather than `-1` sentinels to express "null" values; the bits are stored in a separate `flags` column. There are `HasAddress`, `HasCategory` etc. flags for this purpose. This avoids having to reserve space for `-1` sentinels.
+
+Furthermore:
+
+- The `inlineDepth` column was removed. We were never actually looking at the depth of inlining, all we needed to know "was this frame an inlined function call", and that's now the `IsInlined` flag.
+- The `address` column is now a `Uint32Array` (when using typed arrays) rather than an `Int32Array`, so it now has space for relative addresses in 4GiB binaries (up from 2GiB). The `-1` sentinel is gone and replaced with the `HasAddress` flag.
+- The `address` and `lib` columns share the single `HasAddress` flag. An address is only ever meaningful relative to a library, and every frame from a native library needs an address.
+- `category` and `subcategory` use `Uint8Array` to save space. For profiles with more than 256 subcategories per category, `subcategory` can also be a `Uint16Array`.
+- The `innerWindowID` column is no longer nullable. It has no flag of its own because it already had a natural "no value" representation: `0`. Any `null` becomes `0`.
+
+Here are the flags:
+
+```ts
+export const enum FrameFlag {
+  // Set when this frame is one of the "inline" expansions of a native address.
+  IsInlined = 1 << 0,
+  // Set when `address` and `lib` are meaningful. These two columns are gated by
+  // a single flag because an address is only ever meaningful together with the
+  // library it is relative to.
+  HasAddress = 1 << 1,
+  // Set when `category` and `subcategory` are meaningful. Otherwise the
+  // stack nodes using this frame inherit their category/subcategory from their
+  // parent stack node (or from the default category, if there is no parent).
+  HasCategory = 1 << 2,
+  // Set when `nativeSymbol` is meaningful.
+  HasNativeSymbol = 1 << 3,
+  // Set when `line` is meaningful.
+  HasLine = 1 << 4,
+  // Set when `column` is meaningful.
+  HasColumn = 1 << 5,
+  // Set when `originalLocation` is meaningful.
+  HasOriginalLocation = 1 << 6,
+}
+```
+
+All columns can now be stored as typed arrays:
+
+- `flags` (`Uint8Array`)
+- `category` (`Uint8Array`)
+- `subcategory` (`Uint8Array` or `Uint16Array`)
+- `func` (`Int32Array`)
+- `lib` (`Int32Array`)
+- `address` (`Uint32Array`)
+- `nativeSymbol` (`Int32Array`)
+- `innerWindowID` (`Float64Array`)
+- `line` (`Int32Array`)
+- `column` (`Int32Array`)
+- `originalLocation` (`Int32Array`)
+
+As before, when using JSON rather than JSLB, these columns are JSON arrays of numbers. There shouldn't be any nulls; producers typically use 0 for empty values (and don't set the relevant `HasXYZ` flag).
+
+### Version 70
+
+The `lib` column moved off the `resourceTable` and onto the `frameTable`. Previously a frame's library was reached indirectly, via `frame -> func -> resource -> lib`; now the frame points at its library directly, and `resourceTable` has no `lib` column at all. Frames with no library have their lib set to the `-1` sentinel.
+
+This decouples resources from libraries.
+
+The `lib` column can optionally be stored as an `Int32Array`, for profiles loaded from [JsonSlabs](https://github.com/mstange/json-slabs/) files (.jslb, .jslb.gz). Regular JS / JSON arrays are still accepted - but note that `-1` (not `null`) must be used regardless of format.
+
+### Version 69
+
+A new marker schema display location, `timeline-network`, was added. A marker schema can list `timeline-network` in its `display` array to have markers of that type surfaced in the Network track.
+
+### Version 68
+
+The `startTime` and `endTime` columns of the raw marker table (`thread.markers`) can now optionally be stored as `Float64Array`, for profiles loaded from [JsonSlabs](https://github.com/mstange/json-slabs/) files (.jslb, .jslb.gz). Regular JS / JSON arrays are still accepted.
+
+When using regular arrays, these columns can contain `null` values - but only if the marker **phase** also marks that value as meaningless. Specifically, for `INSTANT` and `INTERVAL_START` markers, the `endTime` value isn't read (and can be `null`), and for `INTERVAL_END` markers, the `startTime` value isn't read (and can be `null`). But it can also be any other non-`null` value; it's ignored either way. When using typed arrays, there is no equivalent `null` sentinel value, but since the value is ignored anyway, you can pick any value. For example zero, or to the value of the previous marker (maybe for better compressibility).
+
+### Version 67
+
+The following raw columns can now optionally be stored as typed arrays, for profiles loaded from [JsonSlabs](https://github.com/mstange/json-slabs/) files (.jslb, .jslb.gz). Regular JS / JSON arrays are still accepted.
+
+- `thread.samples.time` and `thread.samples.timeDeltas` (`Float64Array`)
+- `counter.samples.time` and `counter.samples.timeDeltas` (`Float64Array`)
+- `thread.jsAllocations.time` (`Float64Array`)
+- `thread.nativeAllocations.time` (`Float64Array`)
+- `profile.shared.frameTable.func` (`Int32Array`)
+- `profile.shared.frameTable.address` (`Int32Array`, with `-1` as the sentinel for missing addresses)
+- `profile.shared.frameTable.inlineDepth` (`Uint8Array`)
+
+### Version 66
+
+The `prefix` column of `profile.shared.stackTable` was replaced with a `prefixOffset` column, to improve compressibility.
+For profiles loaded from [JsonSlabs](https://github.com/mstange/json-slabs/) files (.jslb, .jslb.gz),
+`profile.shared.stackTable.prefixOffset` can now optionally be stored as an `Int32Array`. Regular JS / JSON arrays are still accepted.
+
+The `prefixOffset` values have the following meanings:
+
+- `prefixOffset[i] === 0` means: stack `i` is a root.
+- Otherwise, `prefixOffset[i] === k` (k > 0) means: `i`'s parent has index `i - k`.
+
+Parents always come before their children in the stack table (the stack table is stored in topological order), so these offsets are always positive and always point backwards.
+
+### Version 65
+
+The stack table's `frame` column (stored at `profile.shared.stackTable.frame`) can now optionally be stored as an `Int32Array`, for profiles loaded from [JsonSlabs](https://github.com/mstange/json-slabs/) files (.jslb, .jslb.gz). Regular JS / JSON arrays are still accepted.
+
+### Version 64
+
+A new `SourceLocationTable` has been added to `profile.shared.sourceLocationTable`. It holds the original (pre-compilation) source positions produced by source map symbolication, paired with the generated `line`/`column` already on `FrameTable`.
+
+- `source: IndexIntoSourceTable[]`: source file index. Set independently for func entries (the function's definition file) and frame entries (the execution point's file).
+- `line: number[]`: 1-based line number
+- `column: number[]`: 1-based column number
+
+Two new columns were added that index into this table:
+
+- `FrameTable.originalLocation: Array<IndexIntoSourceLocationTable | null>`: the original execution point for the frame
+- `FuncTable.originalLocation: Array<IndexIntoSourceLocationTable | null>`: the original definition site for the function
+
+A new `content: Array<string | null>` column was added to `SourceTable`.
+
+### Version 63
+
+A new `tooltipRows` field was added to `CounterDisplayConfig`.
+This metadata describes the rows of the counter's hover tooltip (data source, value format, label).
+For existing profiles, the rows are derived from the counter's `category` and `name`.
+
+### Version 62
+
+A new `display` field of type `CounterDisplayConfig` was added to `RawCounter`.
+This metadata makes counters self-describing in terms of how they are rendered in the UI.
+For existing profiles, the display config is derived from the counter's `category` and `name`.
+
+### Version 61
+
+The `SourceTable` in `profile.shared.sources` was updated:
+
+- The `uuid` field was renamed to `id`.
+- Two new fields `startLine` and `startColumn` were added (1-based). These describe the start position of the script within its resource, useful for inline scripts. If the source covers the entire file, use `(1, 1)`.
+- A new `sourceMapURL` field was added. Use `null` for entries with no source map URL.
 
 ### Version 60
 
@@ -136,6 +326,28 @@ We've also cleaned up the ResourceTable format:
 Older versions are not documented in this changelog but can be found in [processed-profile-versioning.ts](../src/profile-logic/processed-profile-versioning.ts).
 
 ## Gecko profile format
+
+### Version 37
+
+FileIO marker schemas now have a `tableLabel`.
+
+### Version 36
+
+The `Text` marker's `name` field and the `Log` marker's `message` field are now unique strings, so their payloads hold a string table index instead of the text itself. Both marker schemas declare this with the `unique-string` field format.
+
+No profile format upgrade is needed, as the frontend reads the field format from the marker schema. But older frontends read these two fields directly instead of looking at their schema, so they throw an error while sanitizing the profile for upload and while extracting the MOZ_LOG output. This version bump makes sure that these older frontend versions get updated.
+
+### Version 35
+
+A new `hexadecimal` marker schema field format type has been added, which displays an integer value in hexadecimal with a `0x` prefix.
+
+### Version 34
+
+The `SourceTable` schema was updated:
+
+- The `uuid` field was renamed to `id`.
+- Two new fields `startLine` and `startColumn` were added (1-based). If the source covers the entire file, use `(1, 1)`.
+- A new `sourceMapURL` field was added. It can be omitted if it is the last element in the row and there is no source map URL.
 
 ### Version 33
 

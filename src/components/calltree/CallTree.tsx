@@ -2,11 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 import { PureComponent } from 'react';
-import memoize from 'memoize-immutable';
 import explicitConnect from 'firefox-profiler/utils/connect';
 import { TreeView } from 'firefox-profiler/components/shared/TreeView';
 import { CallTreeEmptyReasons } from './CallTreeEmptyReasons';
-import { Icon } from 'firefox-profiler/components/shared/Icon';
 import {
   getInvertCallstack,
   getImplementationFilter,
@@ -17,7 +15,7 @@ import {
   getScrollToSelectionGeneration,
   getFocusCallTreeGeneration,
   getPreviewSelectionIsBeingModified,
-  getCategories,
+  getIdleCategoryIndex,
   getCurrentTableViewOptions,
 } from 'firefox-profiler/selectors/profile';
 import { selectedThreadSelectors } from 'firefox-profiler/selectors/per-thread';
@@ -30,13 +28,12 @@ import {
   changeTableViewOptions,
   updateBottomBoxContentsAndMaybeOpen,
 } from 'firefox-profiler/actions/profile-view';
-import { assertExhaustiveCheck } from 'firefox-profiler/utils/types';
 
 import type {
   State,
   ImplementationFilter,
   ThreadsKey,
-  CategoryList,
+  IndexIntoCategoryList,
   IndexIntoCallNodeTable,
   CallNodeDisplayData,
   WeightType,
@@ -46,13 +43,10 @@ import type {
 import type { CallTree as CallTreeType } from 'firefox-profiler/profile-logic/call-tree';
 import type { CallNodeInfo } from 'firefox-profiler/profile-logic/call-node-info';
 
-import type {
-  Column,
-  MaybeResizableColumn,
-} from 'firefox-profiler/components/shared/TreeView';
 import type { ConnectedProps } from 'firefox-profiler/utils/connect';
 
 import './CallTree.css';
+import { nameColumn, libColumn, treeColumnsForWeightType } from './columns';
 
 type StateProps = {
   readonly threadsKey: ThreadsKey;
@@ -60,7 +54,7 @@ type StateProps = {
   readonly focusCallTreeGeneration: number;
   readonly tree: CallTreeType;
   readonly callNodeInfo: CallNodeInfo;
-  readonly categories: CategoryList;
+  readonly idleCategoryIndex: IndexIntoCategoryList | null;
   readonly selectedCallNodeIndex: IndexIntoCallNodeTable | null;
   readonly rightClickedCallNodeIndex: IndexIntoCallNodeTable | null;
   readonly expandedCallNodeIndexes: Array<IndexIntoCallNodeTable | null>;
@@ -86,122 +80,10 @@ type DispatchProps = {
 type Props = ConnectedProps<{}, StateProps, DispatchProps>;
 
 class CallTreeImpl extends PureComponent<Props> {
-  _mainColumn: Column<CallNodeDisplayData> = {
-    propName: 'name',
-    titleL10nId: '',
-  };
-  _appendageColumn: Column<CallNodeDisplayData> = {
-    propName: 'lib',
-    titleL10nId: '',
-  };
   _treeView: TreeView<CallNodeDisplayData> | null = null;
-  _takeTreeViewRef = (treeView: TreeView<CallNodeDisplayData> | null) =>
-    (this._treeView = treeView);
-
-  /**
-   * Call Trees can have different types of "weights" for the data. Choose the
-   * appropriate labels for the call tree based on this weight.
-   */
-  _weightTypeToColumns = memoize(
-    (weightType: WeightType): MaybeResizableColumn<CallNodeDisplayData>[] => {
-      switch (weightType) {
-        case 'tracing-ms':
-          return [
-            {
-              propName: 'totalPercent',
-              titleL10nId: '',
-              initialWidth: 50,
-              hideDividerAfter: true,
-            },
-            {
-              propName: 'total',
-              titleL10nId: 'CallTree--tracing-ms-total',
-              minWidth: 30,
-              initialWidth: 70,
-              resizable: true,
-              headerWidthAdjustment: 50,
-            },
-            {
-              propName: 'self',
-              titleL10nId: 'CallTree--tracing-ms-self',
-              minWidth: 30,
-              initialWidth: 70,
-              resizable: true,
-            },
-            {
-              propName: 'icon',
-              titleL10nId: '',
-              component: Icon as any,
-              initialWidth: 10,
-            },
-          ];
-        case 'samples':
-          return [
-            {
-              propName: 'totalPercent',
-              titleL10nId: '',
-              initialWidth: 50,
-              hideDividerAfter: true,
-            },
-            {
-              propName: 'total',
-              titleL10nId: 'CallTree--samples-total',
-              minWidth: 30,
-              initialWidth: 70,
-              resizable: true,
-              headerWidthAdjustment: 50,
-            },
-            {
-              propName: 'self',
-              titleL10nId: 'CallTree--samples-self',
-              minWidth: 30,
-              initialWidth: 70,
-              resizable: true,
-            },
-            {
-              propName: 'icon',
-              titleL10nId: '',
-              component: Icon as any,
-              initialWidth: 10,
-            },
-          ];
-        case 'bytes':
-          return [
-            {
-              propName: 'totalPercent',
-              titleL10nId: '',
-              initialWidth: 50,
-              hideDividerAfter: true,
-            },
-            {
-              propName: 'total',
-              titleL10nId: 'CallTree--bytes-total',
-              minWidth: 30,
-              initialWidth: 140,
-              resizable: true,
-              headerWidthAdjustment: 50,
-            },
-            {
-              propName: 'self',
-              titleL10nId: 'CallTree--bytes-self',
-              minWidth: 30,
-              initialWidth: 90,
-              resizable: true,
-            },
-            {
-              propName: 'icon',
-              titleL10nId: '',
-              component: Icon as any,
-              initialWidth: 10,
-            },
-          ];
-        default:
-          throw assertExhaustiveCheck(weightType, 'Unhandled WeightType.');
-      }
-    },
-    // Use a Map cache, as the function only takes one argument, which is a simple string.
-    { cache: new Map() }
-  );
+  _takeTreeViewRef = (treeView: TreeView<CallNodeDisplayData> | null) => {
+    this._treeView = treeView;
+  };
 
   override componentDidMount() {
     this.focus();
@@ -275,6 +157,7 @@ class CallTreeImpl extends PureComponent<Props> {
       rightClickedCallNodeIndex,
       handleCallNodeTransformShortcut,
       threadsKey,
+      callNodeInfo,
     } = this.props;
     const nodeIndex =
       rightClickedCallNodeIndex !== null
@@ -283,7 +166,7 @@ class CallTreeImpl extends PureComponent<Props> {
     if (nodeIndex === null) {
       return;
     }
-    handleCallNodeTransformShortcut(event, threadsKey, nodeIndex);
+    handleCallNodeTransformShortcut(event, threadsKey, callNodeInfo, nodeIndex);
   };
 
   _onEnterOrDoubleClick = (nodeId: IndexIntoCallNodeTable) => {
@@ -300,17 +183,13 @@ class CallTreeImpl extends PureComponent<Props> {
       expandedCallNodeIndexes,
       selectedCallNodeIndex,
       callNodeInfo,
-      categories,
+      idleCategoryIndex,
     } = this.props;
 
     if (selectedCallNodeIndex !== null || expandedCallNodeIndexes.length > 0) {
       // Let's not change some existing state.
       return;
     }
-
-    const idleCategoryIndex = categories.findIndex(
-      (category) => category.name === 'Idle'
-    );
 
     const newExpandedCallNodeIndexes = expandedCallNodeIndexes.slice();
     const maxInterestingDepth = 17; // scientifically determined
@@ -369,9 +248,9 @@ class CallTreeImpl extends PureComponent<Props> {
     return (
       <TreeView
         tree={tree}
-        fixedColumns={this._weightTypeToColumns(weightType)}
-        mainColumn={this._mainColumn}
-        appendageColumn={this._appendageColumn}
+        fixedColumns={treeColumnsForWeightType(weightType)}
+        mainColumn={nameColumn}
+        appendageColumn={libColumn}
         onSelectionChange={this._onSelectedCallNodeChange}
         onRightClickSelection={this._onRightClickSelection}
         onExpandedNodesChange={this._onExpandedCallNodesChange}
@@ -402,7 +281,7 @@ export const CallTree = explicitConnect<{}, StateProps, DispatchProps>({
     focusCallTreeGeneration: getFocusCallTreeGeneration(state),
     tree: selectedThreadSelectors.getCallTree(state),
     callNodeInfo: selectedThreadSelectors.getCallNodeInfo(state),
-    categories: getCategories(state),
+    idleCategoryIndex: getIdleCategoryIndex(state),
     selectedCallNodeIndex:
       selectedThreadSelectors.getSelectedCallNodeIndex(state),
     rightClickedCallNodeIndex:

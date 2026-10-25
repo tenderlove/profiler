@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import type { SourceMap } from 'firefox-profiler/profile-logic/source-maps/store';
 import type { MixedObject, ApiQueryError } from 'firefox-profiler/types';
 import type { BrowserConnection } from 'firefox-profiler/app-logic/browser-connection';
 
@@ -25,6 +26,10 @@ export interface ExternalCommunicationDelegate {
   ): Promise<string>;
 
   fetchJSSourceFromBrowser(source: string): Promise<string>;
+
+  // Get source map of the given source directly from the browser.
+  // Requires WebChannel version 7+.
+  fetchSourceMapFromBrowser(sourceId: string): Promise<SourceMap>;
 }
 
 export type ApiQueryResult<T> =
@@ -170,5 +175,14 @@ export class RegularExternalCommunicationDelegate implements ExternalCommunicati
     }
     this._callbacks.onBeginBrowserConnectionQuery();
     return browserConnection.getJSSource(source);
+  }
+
+  fetchSourceMapFromBrowser(sourceId: string): Promise<SourceMap> {
+    const browserConnection = this._browserConnection;
+    if (browserConnection === null) {
+      throw new Error('No connection to the browser.');
+    }
+    this._callbacks.onBeginBrowserConnectionQuery();
+    return browserConnection.getSourceMap(sourceId);
   }
 }

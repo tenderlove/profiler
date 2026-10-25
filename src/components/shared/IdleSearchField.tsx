@@ -26,7 +26,9 @@ export class IdleSearchField extends PureComponent<Props, State> {
   _timeout: NodeJS.Timeout | null = null;
   _previouslyNotifiedValue: string;
   _input: HTMLInputElement | null = null;
-  _takeInputRef = (input: HTMLInputElement | null) => (this._input = input);
+  _takeInputRef = (input: HTMLInputElement | null) => {
+    this._input = input;
+  };
 
   constructor(props: Props) {
     super(props);
@@ -120,13 +122,13 @@ export class IdleSearchField extends PureComponent<Props, State> {
         onSubmit={this._onFormSubmit}
       >
         <Localized
-          id="IdleSearchField--search-input"
+          id="IdleSearchField--search-input2"
           attrs={{ placeholder: true }}
         >
           <input
             type="search"
             name="search"
-            placeholder="Enter filter terms"
+            placeholder="Enter filter terms (/)"
             className="idleSearchFieldInput photon-input"
             required={true}
             title={title ?? undefined}

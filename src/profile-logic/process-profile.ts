@@ -1,21 +1,36 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+import {
+  isJsonSlabsFile,
+  decode as decodeJsonSlabs,
+  encode as encodeJsonSlabs,
+} from 'json-slabs';
+
 import { attemptToConvertChromeProfile } from './import/chrome';
 import { attemptToConvertDhat } from './import/dhat';
 import { GlobalDataCollector } from './global-data-collector';
 import { AddressLocator } from './address-locator';
 import {
+  finishRawBalancedNativeAllocationsTableBuilder,
+  finishRawJsAllocationsTableBuilder,
+  finishRawUnbalancedNativeAllocationsTableBuilder,
+  finishRawMarkerTableBuilder,
   getEmptyExtensions,
-  getEmptyRawMarkerTable,
-  getEmptyJsAllocationsTable,
-  getEmptyUnbalancedNativeAllocationsTable,
+  getRawMarkerTableBuilder,
+  getEmptyRawJsAllocationsTable,
+  getEmptyRawUnbalancedNativeAllocationsTable,
+  getRawMarkerTableBuilderFromExisting,
+  type RawFrameTableBuilder,
+  type RawMarkerTableBuilder,
+  type RawStackTableBuilder,
 } from './data-structures';
 import { immutableUpdate, ensureExists } from '../utils/types';
 import { verifyMagic, SIMPLEPERF as SIMPLEPERF_MAGIC } from '../utils/magic';
 import { attemptToUpgradeProcessedProfileThroughMutation } from './processed-profile-versioning';
 import type { ProfileUpgradeInfo } from './processed-profile-versioning';
 import { upgradeGeckoProfileToCurrentVersion } from './gecko-profile-versioning';
+import { ProfileVersionError } from './errors';
 import {
   isPerfScriptFormat,
   convertPerfScriptProfile,
@@ -34,9 +49,27 @@ import {
 import {
   getFriendlyThreadName,
   nudgeReturnAddresses,
+  computeNativeSymbolTableFromRawNativeSymbolTable,
+  subcategoriesNeedSixteenBits,
 } from '../profile-logic/profile-data';
-import { computeStringIndexMarkerFieldsByDataType } from '../profile-logic/marker-schema';
+import {
+  toInt32Array,
+  toUint8Array,
+  toUint32Array,
+  toUint8OrUint16Array,
+  toFloat64Array,
+  toFloat64ArraySetNullToZero,
+} from '../utils/typed-arrays';
+import {
+  addPIICategoriesToMarkerSchema,
+  computeStringIndexMarkerFieldsByDataType,
+  extensionTextMarkerSchema,
+} from '../profile-logic/marker-schema';
 import { convertJsTracerToThread } from '../profile-logic/js-tracer';
+import {
+  compositorScreenshotMarkerSchema,
+  convertScreenshotMarkersToStartEnd,
+} from './process-screenshot-markers';
 
 import type { StringTable } from '../utils/string-table';
 import type {
@@ -44,19 +77,17 @@ import type {
   RawThread,
   RawCounter,
   ExtensionTable,
-  FrameTable,
   RawCounterSamplesTable,
   RawSamplesTable,
-  RawStackTable,
   RawMarkerTable,
   LibMapping,
   IndexIntoStackTable,
   IndexIntoFuncTable,
   IndexIntoStringTable,
   JsTracerTable,
-  JsAllocationsTable,
+  RawJsAllocationsTable,
   ProfilerOverhead,
-  NativeAllocationsTable,
+  RawNativeAllocationsTable,
   Milliseconds,
   Microseconds,
   Address,
@@ -67,6 +98,7 @@ import type {
   GeckoMetaMarkerSchema,
   GeckoStaticFieldSchemaData,
   GeckoMarkers,
+  GeckoMarkerStack,
   GeckoMarkerStruct,
   GeckoMarkerTuple,
   GeckoFrameStruct,
@@ -77,8 +109,10 @@ import type {
   IndexIntoGeckoThreadStringTable,
   GCSliceMarkerPayload,
   GCMajorMarkerPayload,
+  ExtensionTextMarkerPayload,
   MarkerPayload,
   MarkerPayload_Gecko,
+  TextMarkerPayload,
   GCSliceData_Gecko,
   GCMajorCompleted,
   GCMajorCompleted_Gecko,
@@ -95,10 +129,16 @@ import type {
   Pid,
   GeckoMarkerSchema,
   GeckoSourceTable,
+  CategoryList,
   IndexIntoCategoryList,
   IndexIntoFrameTable,
+  IndexIntoLibs,
+  CounterDisplayConfig,
+  RawProfileSharedData,
 } from 'firefox-profiler/types';
+import { FrameFlag } from 'firefox-profiler/types';
 import { decompress, isGzip } from 'firefox-profiler/utils/gz';
+import { jsonEncodeObjectWithTypedArraysAsRegularArrays } from 'firefox-profiler/utils/json-with-typed-arrays';
 
 type RegExpResult = null | string[];
 /**
@@ -180,7 +220,11 @@ type ExtractionInfo = {
   addressLocator: AddressLocator;
   stringToNewFuncIndexAndFrameAddress: Map<
     string,
-    { funcIndex: IndexIntoFuncTable; frameAddress: Address | null }
+    {
+      funcIndex: IndexIntoFuncTable;
+      frameAddress: Address | null;
+      libIndex: IndexIntoLibs | null;
+    }
   >;
   globalDataCollector: GlobalDataCollector;
   geckoSourceTable: GeckoSourceTable;
@@ -204,6 +248,7 @@ export function extractFuncsAndResourcesFromFrameLocations(
 ): {
   frameFuncs: IndexIntoFuncTable[];
   frameAddresses: (Address | null)[];
+  frameLibs: (IndexIntoLibs | null)[];
 } {
   const stringTable = globalDataCollector.getStringTable();
 
@@ -220,6 +265,7 @@ export function extractFuncsAndResourcesFromFrameLocations(
   // information by applying various string matching heuristics.
   const frameFuncs = [];
   const frameAddresses = [];
+  const frameLibs: (IndexIntoLibs | null)[] = [];
   for (let frameIndex = 0; frameIndex < frameLocations.length; frameIndex++) {
     const originalLocationIndex = frameLocations[frameIndex];
     const locationString = ensureExists(
@@ -231,9 +277,10 @@ export function extractFuncsAndResourcesFromFrameLocations(
       extractionInfo.stringToNewFuncIndexAndFrameAddress.get(locationString);
     if (info !== undefined) {
       // The location string was already processed.
-      const { funcIndex, frameAddress } = info;
+      const { funcIndex, frameAddress, libIndex } = info;
       frameFuncs.push(funcIndex);
       frameAddresses.push(frameAddress);
+      frameLibs.push(libIndex);
       continue;
     }
 
@@ -241,6 +288,7 @@ export function extractFuncsAndResourcesFromFrameLocations(
     // resource information.
     let funcIndex = null;
     let frameAddress = null;
+    let libIndex: IndexIntoLibs | null = null;
     const unsymbolicatedInfo = _extractUnsymbolicatedFunction(
       extractionInfo,
       locationString,
@@ -249,6 +297,7 @@ export function extractFuncsAndResourcesFromFrameLocations(
     if (unsymbolicatedInfo !== null) {
       funcIndex = unsymbolicatedInfo.funcIndex;
       frameAddress = unsymbolicatedInfo.frameAddress;
+      libIndex = unsymbolicatedInfo.libIndex;
     } else {
       funcIndex = _extractCppFunction(extractionInfo, locationString);
       if (funcIndex === null) {
@@ -267,15 +316,18 @@ export function extractFuncsAndResourcesFromFrameLocations(
     extractionInfo.stringToNewFuncIndexAndFrameAddress.set(locationString, {
       funcIndex,
       frameAddress,
+      libIndex,
     });
 
     frameFuncs.push(funcIndex);
     frameAddresses.push(frameAddress);
+    frameLibs.push(libIndex);
   }
 
   return {
     frameFuncs,
     frameAddresses,
+    frameLibs,
   };
 }
 
@@ -286,24 +338,30 @@ export function extractFuncsAndResourcesFromFrameLocations(
  * into the same function, so cannot do any function grouping. So we get one "function" per
  * address.
  * We also associate the address with the library that contains it, and convert the address
- * into a library-relative offset. This association is established via the function's
- * "resource": The function points to the resource (of type resourceTypes.library), and the
- * resource has the index to the library in thread.libs.
- * We return the index of the newly-added function, and the address as a library-relative
- * offset.
+ * into a library-relative offset. The library index goes onto the frame (frameTable.lib);
+ * and the function additionally gets a "resource" of type ResourceType.Library.
  */
 function _extractUnsymbolicatedFunction(
   extractionInfo: ExtractionInfo,
   locationString: string,
   locationIndex: IndexIntoStringTable
-): { funcIndex: IndexIntoFuncTable; frameAddress: Address } | null {
+): {
+  funcIndex: IndexIntoFuncTable;
+  // null if the address didn't fall into any of the mapped libraries, or if it
+  // couldn't be parsed. There is no library to be relative to in that case, so
+  // there is no meaningful address to store and the frame gets no HasAddress
+  // flag.
+  frameAddress: Address | null;
+  libIndex: IndexIntoLibs | null;
+} | null {
   if (!locationString.startsWith('0x')) {
     return null;
   }
   const { addressLocator, globalDataCollector } = extractionInfo;
 
   let resourceIndex = -1;
-  let addressRelativeToLib: Address = -1;
+  let libIndex: IndexIntoLibs | null = null;
+  let addressRelativeToLib: Address | null = null;
 
   try {
     // The frame address, as observed in the profiled process. This address was
@@ -321,8 +379,8 @@ function _extractUnsymbolicatedFunction(
       // Yes, we found the library whose mapping covers this address!
       addressRelativeToLib = relativeAddress;
 
-      const libIndex = globalDataCollector.indexForLib(lib);
-      resourceIndex = globalDataCollector.indexForLibResource(libIndex);
+      libIndex = globalDataCollector.indexForLib(lib);
+      resourceIndex = globalDataCollector.indexForLibResourceByLib(libIndex);
     }
   } catch (_e) {
     // Probably a hex parse error. Ignore.
@@ -337,7 +395,7 @@ function _extractUnsymbolicatedFunction(
     null,
     null
   );
-  return { funcIndex, frameAddress: addressRelativeToLib };
+  return { funcIndex, frameAddress: addressRelativeToLib, libIndex };
 }
 
 /**
@@ -379,7 +437,7 @@ function _extractCppFunction(
     return frameInfo.funcIndex;
   }
 
-  const resourceIndex = globalDataCollector.indexForNameOnlyLibResource(
+  const resourceIndex = globalDataCollector.indexForLibResourceByName(
     libraryNameStringIndex
   );
   return globalDataCollector.indexForFunc(
@@ -431,13 +489,27 @@ function _extractJsFunction(
   let processedSourceIndex = null;
   if (sourceIndex !== undefined) {
     const geckoSourceIdx = parseInt(sourceIndex, 10);
-    // Look up the UUID for this source index from the process's sources table
+    // Look up the ID for this source index from the process's sources table.
     if (geckoSourceIdx < geckoSourceTable.data.length) {
-      const uuidIndex = geckoSourceTable.schema.uuid;
+      const idIndex = geckoSourceTable.schema.id;
       const filenameIndex = geckoSourceTable.schema.filename;
-      const uuid = geckoSourceTable.data[geckoSourceIdx][uuidIndex];
+      const startLineIndex = geckoSourceTable.schema.startLine;
+      const startColumnIndex = geckoSourceTable.schema.startColumn;
+      const sourceMapURLIndex = geckoSourceTable.schema.sourceMapURL;
+      const id = geckoSourceTable.data[geckoSourceIdx][idIndex];
       const filename = geckoSourceTable.data[geckoSourceIdx][filenameIndex];
-      processedSourceIndex = globalDataCollector.indexForSource(uuid, filename);
+      const startLine = geckoSourceTable.data[geckoSourceIdx][startLineIndex];
+      const startColumn =
+        geckoSourceTable.data[geckoSourceIdx][startColumnIndex];
+      const sourceMapURL =
+        geckoSourceTable.data[geckoSourceIdx][sourceMapURLIndex];
+      processedSourceIndex = globalDataCollector.indexForSource(
+        id,
+        filename,
+        startLine,
+        startColumn,
+        sourceMapURL
+      );
     }
   }
 
@@ -497,23 +569,48 @@ function _extractUnknownFunctionType(
  */
 function _processFrameTable(
   geckoFrameStruct: GeckoFrameStruct,
-  sharedFrameTable: FrameTable,
+  sharedFrameTable: RawFrameTableBuilder,
   frameFuncs: IndexIntoFuncTable[],
-  frameAddresses: (Address | null)[]
+  frameAddresses: (Address | null)[],
+  frameLibs: (IndexIntoLibs | null)[]
 ): IndexIntoFrameTable {
   const frameIndexOffset = sharedFrameTable.length;
   for (let i = 0; i < geckoFrameStruct.length; i++) {
     const newIndex = i + frameIndexOffset;
-    sharedFrameTable.address[newIndex] = frameAddresses[i] ?? -1;
-    sharedFrameTable.inlineDepth[newIndex] = 0;
-    sharedFrameTable.category[newIndex] = geckoFrameStruct.category[i];
-    sharedFrameTable.subcategory[newIndex] = geckoFrameStruct.subcategory[i];
+    const address = frameAddresses[i];
+    const lib = frameLibs[i];
+    const category = geckoFrameStruct.category[i];
+    const line = geckoFrameStruct.line[i];
+    const column = geckoFrameStruct.column[i];
+    let flags = 0;
+    // `_extractUnsymbolicatedFunction` only produces an address for frames whose
+    // address fell into a mapped library, so these two are always both present
+    // or both absent, and share the one flag.
+    if (address !== null && lib !== null) {
+      flags |= FrameFlag.HasAddress;
+    }
+    if (category !== null) {
+      flags |= FrameFlag.HasCategory;
+    }
+    if (line !== null) {
+      flags |= FrameFlag.HasLine;
+    }
+    if (column !== null) {
+      flags |= FrameFlag.HasColumn;
+    }
+    sharedFrameTable.flags[newIndex] = flags;
+    sharedFrameTable.address[newIndex] = address ?? 0;
+    sharedFrameTable.category[newIndex] = category ?? 0;
+    sharedFrameTable.subcategory[newIndex] =
+      geckoFrameStruct.subcategory[i] ?? 0;
     sharedFrameTable.func[newIndex] = frameFuncs[i];
-    sharedFrameTable.nativeSymbol[newIndex] = null;
+    sharedFrameTable.lib[newIndex] = lib ?? 0;
+    sharedFrameTable.nativeSymbol[newIndex] = 0;
     sharedFrameTable.innerWindowID[newIndex] =
-      geckoFrameStruct.innerWindowID[i];
-    sharedFrameTable.line[newIndex] = geckoFrameStruct.line[i];
-    sharedFrameTable.column[newIndex] = geckoFrameStruct.column[i];
+      geckoFrameStruct.innerWindowID[i] ?? 0;
+    sharedFrameTable.line[newIndex] = line ?? 0;
+    sharedFrameTable.column[newIndex] = column ?? 0;
+    sharedFrameTable.originalLocation[newIndex] = 0;
   }
   sharedFrameTable.length += geckoFrameStruct.length;
   return frameIndexOffset;
@@ -525,7 +622,7 @@ function _processFrameTable(
  */
 function _processStackTable(
   geckoStackTable: GeckoStackStruct,
-  sharedStackTable: RawStackTable,
+  sharedStackTable: RawStackTableBuilder,
   frameIndexOffset: IndexIntoFrameTable
 ): IndexIntoStackTable {
   const stackIndexOffset = sharedStackTable.length;
@@ -542,6 +639,20 @@ function _processStackTable(
 }
 
 /**
+ * We expect a captured backtrace here, with a samples table. But the "stack" key
+ * isn't reserved for that: some markers store an unrelated value (e.g. Log markers
+ * from the test harness put a textual stack trace string there). Such a value has
+ * no `samples`, so checking for it both selects real backtraces and keeps one bad
+ * marker from failing the whole profile. A non-backtrace stack is left in place to
+ * be handled by the marker schema like any other field.
+ */
+function _payloadHasStack(
+  data: MarkerPayload_Gecko
+): data is MarkerPayload_Gecko & { stack: GeckoMarkerStack } {
+  return 'stack' in data && !!data.stack?.samples?.data.length;
+}
+
+/**
  * Convert stack field to cause field for the given payload. A cause field includes
  * the thread ID (tid), an IndexIntoStackTable, and the time the stack was captured.
  * If the stack was captured within the start and end time of the marker, this was a
@@ -552,7 +663,7 @@ function _convertStackToCause(
   data: MarkerPayload_Gecko,
   stackIndexOffset: IndexIntoStackTable
 ) {
-  if ('stack' in data && data.stack && data.stack.samples.data.length > 0) {
+  if (_payloadHasStack(data)) {
     const { stack, ...newData } = data;
     const stackIndex = stack.samples.data[0][stack.samples.schema.stack];
     const time = stack.samples.data[0][stack.samples.schema.time];
@@ -578,7 +689,7 @@ function _convertPayloadStackToIndex(
   if (!data) {
     return null;
   }
-  if ('stack' in data && data.stack && data.stack.samples.data.length > 0) {
+  if (_payloadHasStack(data)) {
     const { samples } = data.stack;
     const geckoStackIndex = samples.data[0][samples.schema.stack];
     if (geckoStackIndex !== null) {
@@ -592,8 +703,8 @@ function _convertPayloadStackToIndex(
  * Process the markers.
  *  Convert stacks to causes.
  *  Process GC markers.
- *  Extract JS allocations into the JsAllocationsTable.
- *  Extract Native allocations into the NativeAllocationsTable.
+ *  Extract JS allocations into the RawJsAllocationsTable.
+ *  Extract Native allocations into the RawNativeAllocationsTable.
  */
 function _processMarkers(
   geckoMarkers: GeckoMarkerStruct,
@@ -603,13 +714,13 @@ function _processMarkers(
   stackIndexOffset: IndexIntoStackTable
 ): {
   markers: RawMarkerTable;
-  jsAllocations: JsAllocationsTable | null;
-  nativeAllocations: NativeAllocationsTable | null;
+  jsAllocations: RawJsAllocationsTable | null;
+  nativeAllocations: RawNativeAllocationsTable | null;
 } {
-  const markers = getEmptyRawMarkerTable();
-  const jsAllocations = getEmptyJsAllocationsTable();
+  const markers = getRawMarkerTableBuilder();
+  const jsAllocations = getEmptyRawJsAllocationsTable();
   const inProgressNativeAllocations =
-    getEmptyUnbalancedNativeAllocationsTable();
+    getEmptyRawUnbalancedNativeAllocationsTable();
   const memoryAddress: number[] = [];
   const threadId: number[] = [];
 
@@ -686,16 +797,16 @@ function _processMarkers(
       }
     }
 
+    const markerName = stringArray[geckoMarkers.name[markerIndex]];
     const payload = _processMarkerPayload(
+      markerName,
       geckoPayload,
       stringArray,
       stringTable,
       stringIndexMarkerFieldsByDataType,
       stackIndexOffset
     );
-    const name = stringTable.indexForString(
-      stringArray[geckoMarkers.name[markerIndex]]
-    );
+    const name = stringTable.indexForString(markerName);
     const startTime = geckoMarkers.startTime[markerIndex];
     const endTime = geckoMarkers.endTime[markerIndex];
     const phase = geckoMarkers.phase[markerIndex];
@@ -717,29 +828,24 @@ function _processMarkers(
     nativeAllocations = null;
   } else if (hasMemoryAddresses) {
     // This is the newer native allocations with memory addresses.
-    nativeAllocations = {
-      time: inProgressNativeAllocations.time,
-      weight: inProgressNativeAllocations.weight,
-      weightType: inProgressNativeAllocations.weightType,
-      stack: inProgressNativeAllocations.stack,
+    nativeAllocations = finishRawBalancedNativeAllocationsTableBuilder({
+      ...inProgressNativeAllocations,
       memoryAddress,
       threadId,
-      length: inProgressNativeAllocations.length,
-    };
+    });
   } else {
     // There is the older native allocations, without memory addresses.
-    nativeAllocations = {
-      time: inProgressNativeAllocations.time,
-      weight: inProgressNativeAllocations.weight,
-      weightType: inProgressNativeAllocations.weightType,
-      stack: inProgressNativeAllocations.stack,
-      length: inProgressNativeAllocations.length,
-    };
+    nativeAllocations = finishRawUnbalancedNativeAllocationsTableBuilder(
+      inProgressNativeAllocations
+    );
   }
 
   return {
-    markers: markers,
-    jsAllocations: jsAllocations.length === 0 ? null : jsAllocations,
+    markers: finishRawMarkerTableBuilder(markers),
+    jsAllocations:
+      jsAllocations.length === 0
+        ? null
+        : finishRawJsAllocationsTableBuilder(jsAllocations),
     nativeAllocations,
   };
 }
@@ -754,11 +860,59 @@ function convertPhaseTimes(
   return phases;
 }
 
+function _getExtensionTextMarkerPayloadFields(
+  markerName: string,
+  text: string
+): Pick<ExtensionTextMarkerPayload, 'type' | 'name' | 'extensionId'> | null {
+  switch (markerName) {
+    case 'ExtensionParent':
+    case 'ExtensionChild': {
+      const match = /^(.*), (api_(?:call|event): [\s\S]*)$/.exec(text);
+      return match
+        ? {
+            type: 'ExtensionText',
+            name: match[2],
+            extensionId: match[1],
+          }
+        : null;
+    }
+    case 'Extension Suspend': {
+      const match = / by .*$/.exec(text);
+      return match === null
+        ? null
+        : {
+            type: 'ExtensionText',
+            name: text.slice(0, match.index),
+            extensionId: text.slice(match.index + ' by '.length),
+          };
+    }
+    default:
+      return null;
+  }
+}
+
+function _maybeProcessExtensionTextMarkerPayload(
+  markerName: string,
+  payload: TextMarkerPayload,
+  stringArray: string[]
+): ExtensionTextMarkerPayload | null {
+  const text =
+    typeof payload.name === 'number' ? stringArray[payload.name] : payload.name;
+  const fields = _getExtensionTextMarkerPayloadFields(markerName, text);
+  if (!fields) {
+    return null;
+  }
+
+  const { type: _type, name: _name, ...otherFields } = payload;
+  return { ...otherFields, ...fields };
+}
+
 /**
- * Process just the marker payload. This converts stacks into causes, and augments
- * the GC information.
+ * Process just the marker payload. This converts stacks into causes, augments
+ * the GC information, and converts extension text markers into structured payloads.
  */
 function _processMarkerPayload(
+  markerName: string,
   geckoPayload: MarkerPayload_Gecko | null,
   stringArray: string[],
   stringTable: StringTable,
@@ -774,6 +928,17 @@ function _processMarkerPayload(
   //
   // Warning: This function converts the payload into an any type.
   const payload = _convertStackToCause(geckoPayload, stackIndexOffset);
+
+  if (payload.type === 'Text') {
+    const extensionTextPayload = _maybeProcessExtensionTextMarkerPayload(
+      markerName,
+      payload,
+      stringArray
+    );
+    if (extensionTextPayload) {
+      return extensionTextPayload;
+    }
+  }
 
   switch (payload.type) {
     /*
@@ -861,10 +1026,19 @@ function _processMarkerPayload(
   // here, and then to `MarkerPayload` as the return value for this function.
   // This doesn't provide type safety but it shows the intent of going from an
   // object without much type safety, to a specific type definition.
-  const data: MarkerPayload = payload as any;
+  let data: MarkerPayload = payload as any;
 
   if (!data.type) {
     return data;
+  }
+
+  if (data.type === 'CompositorScreenshot') {
+    const { windowWidth, windowHeight, ...rest } = data as any;
+    rest.windowID = String(rest.windowID);
+    data =
+      windowWidth === undefined || windowHeight === undefined
+        ? rest
+        : { ...rest, windowSize: { width: windowWidth, height: windowHeight } };
   }
 
   const stringIndexMarkerFields = stringIndexMarkerFieldsByDataType.get(
@@ -959,6 +1133,172 @@ function _processSamples(
 }
 
 /**
+ * Derive a CounterDisplayConfig from a counter's category and name.
+ */
+export function deriveCounterDisplay(
+  category: string,
+  name: string
+): CounterDisplayConfig {
+  if (category === 'Bandwidth') {
+    return {
+      graphType: 'line-rate',
+      unit: 'bytes',
+      color: 'blue',
+      markerSchemaLocation: null,
+      sortWeight: 10,
+      label: 'Bandwidth',
+      tooltipRows: [
+        {
+          type: 'value',
+          source: 'rate',
+          format: { unit: 'bytes-per-second', co2: 'per-byte' },
+          label: 'Transfer speed for this sample',
+          labelKey: 'bandwidth-speed',
+        },
+        {
+          type: 'value',
+          source: 'sample-number',
+          format: { unit: 'number' },
+          label: 'read/write operations since the previous sample',
+          labelKey: 'bandwidth-operations',
+        },
+        { type: 'separator' },
+        {
+          type: 'value',
+          source: 'accumulated',
+          format: { unit: 'bytes', co2: 'per-byte' },
+          label: 'Data transferred up to this time',
+          labelKey: 'bandwidth-cumulative',
+        },
+        {
+          type: 'value',
+          source: 'count-range',
+          format: { unit: 'bytes', co2: 'per-byte' },
+          label: 'Data transferred in the visible range',
+          labelKey: 'bandwidth-total-graph',
+        },
+        {
+          type: 'value',
+          source: 'selection-total',
+          format: { unit: 'bytes', co2: 'per-byte' },
+          label: 'Data transferred in the current selection',
+          labelKey: 'bandwidth-total-selection',
+          requiresPreviewSelection: true,
+        },
+      ],
+    };
+  } else if (category === 'Memory') {
+    return {
+      graphType: 'line-accumulated',
+      unit: 'bytes',
+      color: 'orange',
+      markerSchemaLocation: 'timeline-memory',
+      sortWeight: 20,
+      label: 'Memory',
+      tooltipRows: [
+        {
+          type: 'value',
+          source: 'accumulated',
+          format: { unit: 'bytes' },
+          label: 'relative memory at this time',
+          labelKey: 'memory-relative',
+        },
+        {
+          type: 'value',
+          source: 'count-range',
+          format: { unit: 'bytes' },
+          label: 'memory range in graph',
+          labelKey: 'memory-range',
+        },
+        {
+          type: 'value',
+          source: 'sample-number',
+          format: { unit: 'number' },
+          label: 'allocations and deallocations since the previous sample',
+          labelKey: 'memory-operations',
+        },
+      ],
+    };
+  } else if (category === 'power') {
+    return {
+      graphType: 'line-rate',
+      unit: 'pWh',
+      color: 'grey',
+      markerSchemaLocation: null,
+      sortWeight: 30,
+      label: name,
+      tooltipRows: [
+        {
+          type: 'value',
+          source: 'count',
+          format: { unit: 'number', co2: 'per-watthour', scale: 'power' },
+          label: 'Power',
+          labelKey: 'power',
+        },
+        {
+          type: 'value',
+          source: 'selection-total',
+          format: { unit: 'number', co2: 'per-watthour', scale: 'energy' },
+          label: 'Energy used in the current selection',
+          labelKey: 'power-energy-preview',
+          requiresPreviewSelection: true,
+        },
+        {
+          type: 'value',
+          source: 'selection-rate',
+          format: { unit: 'number', co2: 'per-watthour', scale: 'power' },
+          label: 'Average power in the current selection',
+          labelKey: 'power-average-preview',
+          requiresPreviewSelection: true,
+        },
+        {
+          type: 'value',
+          source: 'committed-range-total',
+          format: { unit: 'number', co2: 'per-watthour', scale: 'energy' },
+          label: 'Energy used in the visible range',
+          labelKey: 'power-energy-range',
+        },
+      ],
+    };
+  } else if (category === 'CPU' && name === 'processCPU') {
+    return {
+      graphType: 'line-rate',
+      unit: 'percent',
+      color: 'grey',
+      markerSchemaLocation: null,
+      sortWeight: 40,
+      label: 'Process CPU',
+      tooltipRows: [
+        {
+          type: 'value',
+          source: 'cpu-ratio',
+          format: { unit: 'percent' },
+          label: 'CPU',
+          labelKey: 'cpu',
+        },
+      ],
+    };
+  }
+
+  return {
+    graphType: 'line-rate',
+    unit: '',
+    color: 'grey',
+    markerSchemaLocation: null,
+    sortWeight: 50,
+    label: name,
+    tooltipRows: [
+      {
+        type: 'value',
+        source: 'count',
+        format: { unit: 'number' },
+        label: name,
+      },
+    ],
+  };
+}
+
+/**
  * Converts the Gecko list of counters into the processed format.
  */
 function _processCounters(
@@ -1017,6 +1357,7 @@ function _processCounters(
         pid: mainThreadPid,
         mainThreadIndex,
         samples: adjustTableTimeDeltas(processedCounterSamples, delta),
+        display: deriveCounterDisplay(category, name),
       });
       return result;
     },
@@ -1114,7 +1455,7 @@ function _processThread(
   const { libs, pausedRanges, meta, sources } = processProfile;
   const { shutdownTime } = meta;
 
-  const { frameFuncs, frameAddresses } =
+  const { frameFuncs, frameAddresses, frameLibs } =
     extractFuncsAndResourcesFromFrameLocations(
       geckoFrameStruct.location,
       geckoFrameStruct.relevantForJS,
@@ -1128,11 +1469,12 @@ function _processThread(
     geckoFrameStruct,
     globalDataCollector.getFrameTable(),
     frameFuncs,
-    frameAddresses
+    frameAddresses,
+    frameLibs
   );
   const stackIndexOffset = _processStackTable(
     geckoStackTable,
-    globalDataCollector.getStackTable(),
+    globalDataCollector.getStackTableBuilder(),
     frameIndexOffset
   );
 
@@ -1265,10 +1607,9 @@ function _processThread(
  * has its own timebase, and we don't want to keep converting timestamps when
  * we deal with the integrated profile.
  */
-export function adjustTableTimestamps<Table extends { time: Milliseconds[] }>(
-  table: Table,
-  delta: Milliseconds
-): Table {
+export function adjustTableTimestamps<
+  Table extends { time: Milliseconds[] | Float64Array<ArrayBuffer> },
+>(table: Table, delta: Milliseconds): Table {
   return {
     ...table,
     time: table.time.map((time) => time + delta),
@@ -1276,7 +1617,7 @@ export function adjustTableTimestamps<Table extends { time: Milliseconds[] }>(
 }
 
 export function adjustTableTimeDeltas<
-  Table extends { timeDeltas?: Milliseconds[] },
+  Table extends { timeDeltas?: Milliseconds[] | Float64Array<ArrayBuffer> },
 >(table: Table, delta: Milliseconds): Table {
   const { timeDeltas } = table;
   if (timeDeltas === undefined) {
@@ -1339,13 +1680,23 @@ export function adjustMarkerTimestamps(
   markers: RawMarkerTable,
   delta: Milliseconds
 ): RawMarkerTable {
-  function adjustTimeIfNotNull(time: number | null) {
-    return time === null ? time : time + delta;
+  function adjustTimes(
+    times: Array<number | null> | Float64Array<ArrayBuffer>
+  ): Array<number | null> | Float64Array<ArrayBuffer> {
+    if (Array.isArray(times)) {
+      return times.map((time) => (time === null ? time : time + delta));
+    }
+    // JSLB Float64Array: no nulls; shift every value.
+    const out = new Float64Array(times.length);
+    for (let i = 0; i < times.length; i++) {
+      out[i] = times[i] + delta;
+    }
+    return out;
   }
   return {
     ...markers,
-    startTime: markers.startTime.map(adjustTimeIfNotNull),
-    endTime: markers.endTime.map(adjustTimeIfNotNull),
+    startTime: adjustTimes(markers.startTime),
+    endTime: adjustTimes(markers.endTime),
     data: markers.data.map((data) => {
       if (!data) {
         return data;
@@ -1451,7 +1802,7 @@ function _convertGeckoMarkerSchema(
     description = staticFields[staticDescriptionFieldIndex].value;
   }
 
-  return {
+  return addPIICategoriesToMarkerSchema({
     name,
     tooltipLabel,
     tableLabel,
@@ -1462,7 +1813,7 @@ function _convertGeckoMarkerSchema(
     graphs,
     colorField,
     isStackBased,
-  };
+  });
 }
 
 /**
@@ -1472,20 +1823,51 @@ function _convertGeckoMarkerSchema(
  * primary list that is stored on the processed profile's meta object.
  */
 function processMarkerSchema(geckoProfile: GeckoProfile): MarkerSchema[] {
-  const combinedSchemas: MarkerSchema[] = geckoProfile.meta.markerSchema.map(
-    _convertGeckoMarkerSchema
-  );
+  const combinedSchemas: MarkerSchema[] = geckoProfile.meta.markerSchema
+    .filter(({ name }) => name !== 'CompositorScreenshot')
+    .map(_convertGeckoMarkerSchema);
   const names: Set<string> = new Set(combinedSchemas.map(({ name }) => name));
 
   for (const subprocess of geckoProfile.processes) {
     for (const markerSchema of subprocess.meta.markerSchema) {
-      if (!names.has(markerSchema.name)) {
+      if (
+        markerSchema.name !== 'CompositorScreenshot' &&
+        !names.has(markerSchema.name)
+      ) {
         names.add(markerSchema.name);
         combinedSchemas.push(_convertGeckoMarkerSchema(markerSchema));
       }
     }
   }
 
+  let isExtensionTextMarkerSchemaUsed = false;
+  for (const profile of [geckoProfile, ...geckoProfile.processes]) {
+    for (const thread of profile.threads) {
+      const { markers, stringTable } = thread;
+      for (const marker of markers.data) {
+        const payload = marker[markers.schema.data];
+        if (!payload || payload.type !== 'Text') {
+          continue;
+        }
+        const markerName = stringTable[marker[markers.schema.name]];
+        const text =
+          typeof payload.name === 'number'
+            ? stringTable[payload.name]
+            : payload.name;
+        const fields = _getExtensionTextMarkerPayloadFields(markerName, text);
+        if (fields) {
+          isExtensionTextMarkerSchemaUsed = true;
+        }
+      }
+    }
+  }
+
+  if (
+    isExtensionTextMarkerSchemaUsed &&
+    !names.has(extensionTextMarkerSchema.name)
+  ) {
+    combinedSchemas.push(extensionTextMarkerSchema);
+  }
   return combinedSchemas;
 }
 
@@ -1645,7 +2027,10 @@ export function processGeckoProfile(geckoProfile: GeckoProfile): Profile {
 
   const markerSchema = processMarkerSchema(geckoProfile);
   const stringIndexMarkerFieldsByDataType =
-    computeStringIndexMarkerFieldsByDataType(markerSchema);
+    computeStringIndexMarkerFieldsByDataType([
+      ...markerSchema,
+      compositorScreenshotMarkerSchema,
+    ]);
 
   const extensions: ExtensionTable = geckoProfile.meta.extensions
     ? _toStructOfArrays(geckoProfile.meta.extensions)
@@ -1655,15 +2040,30 @@ export function processGeckoProfile(geckoProfile: GeckoProfile): Profile {
 
   globalDataCollector.addExtensionOrigins(extensions);
 
-  for (const thread of geckoProfile.threads) {
-    threads.push(
-      _processThread(
-        thread,
-        geckoProfile,
-        stringIndexMarkerFieldsByDataType,
-        globalDataCollector
-      )
+  let hasCompositorScreenshots = false;
+  const processThread = (
+    thread: GeckoThread,
+    processProfile: GeckoProfile | GeckoSubprocessProfile
+  ): RawThread => {
+    const newThread = _processThread(
+      thread,
+      processProfile,
+      stringIndexMarkerFieldsByDataType,
+      globalDataCollector
     );
+    const markers = convertScreenshotMarkersToStartEnd(
+      newThread.markers,
+      globalDataCollector.getStringTable()
+    );
+    if (markers !== null) {
+      hasCompositorScreenshots = true;
+      newThread.markers = markers;
+    }
+    return newThread;
+  };
+
+  for (const thread of geckoProfile.threads) {
+    threads.push(processThread(thread, geckoProfile));
   }
   const counters: RawCounter[] = _processCounters(geckoProfile, threads, 0);
   const nullableProfilerOverhead: Array<ProfilerOverhead | null> = [
@@ -1674,12 +2074,7 @@ export function processGeckoProfile(geckoProfile: GeckoProfile): Profile {
     const adjustTimestampsBy =
       subprocessProfile.meta.startTime - geckoProfile.meta.startTime;
     for (const thread of subprocessProfile.threads) {
-      const newThread: RawThread = _processThread(
-        thread,
-        subprocessProfile,
-        stringIndexMarkerFieldsByDataType,
-        globalDataCollector
-      );
+      const newThread = processThread(thread, subprocessProfile);
       newThread.samples = adjustTableTimeDeltas(
         newThread.samples,
         adjustTimestampsBy
@@ -1724,6 +2119,10 @@ export function processGeckoProfile(geckoProfile: GeckoProfile): Profile {
     nullableProfilerOverhead.push(
       _processProfilerOverhead(subprocessProfile, threads, adjustTimestampsBy)
     );
+  }
+
+  if (hasCompositorScreenshots) {
+    markerSchema.push(compositorScreenshotMarkerSchema);
   }
 
   let pages = [...(geckoProfile.pages || [])];
@@ -1851,8 +2250,161 @@ export function processGeckoProfile(geckoProfile: GeckoProfile): Profile {
 /**
  * Take a processed profile and convert it to a string.
  */
-export function serializeProfile(profile: Profile): string {
-  return JSON.stringify(profile);
+export function serializeProfileToJsonString(profile: Profile): string {
+  return jsonEncodeObjectWithTypedArraysAsRegularArrays(profile);
+}
+
+/**
+ * Convert all columns of a profile which are eligible to be stored as typed
+ * arrays into typed arrays.
+ *
+ * This is useful if the profile will be saved as a JSLB file:
+ * `serializeProfileToJsonSlabsFile` will be able to store these columns as binary
+ * slabs instead of as JSON arrays, which speeds up both the saving and the loading
+ * of the file.
+ *
+ * Does not mutate the input profile.
+ */
+export function optimizeProfileForStorage(profile: Profile): Profile {
+  return {
+    ...profile,
+    shared: convertSharedTablesEligibleColumns(
+      profile.shared,
+      profile.meta.categories
+    ),
+    threads: profile.threads.map(convertThreadEligibleColumns),
+    counters: profile.counters?.map(convertCounterEligibleColumns),
+  };
+}
+
+function convertSharedTablesEligibleColumns(
+  shared: RawProfileSharedData,
+  categories: CategoryList | undefined
+): RawProfileSharedData {
+  const { stackTable, frameTable, funcTable, nativeSymbols } = shared;
+  return {
+    ...shared,
+    stackTable: {
+      frame: toInt32Array(stackTable.frame),
+      prefixOffset: toInt32Array(stackTable.prefixOffset),
+      length: stackTable.length,
+    },
+    frameTable: {
+      length: frameTable.length,
+      flags: toUint8Array(frameTable.flags),
+      address: toUint32Array(frameTable.address),
+      func: toInt32Array(frameTable.func),
+      category: toUint8Array(frameTable.category),
+      subcategory: toUint8OrUint16Array(
+        frameTable.subcategory,
+        subcategoriesNeedSixteenBits(categories)
+      ),
+      lib: toInt32Array(frameTable.lib),
+      nativeSymbol: toInt32Array(frameTable.nativeSymbol),
+      innerWindowID: toFloat64Array(frameTable.innerWindowID),
+      line: toInt32Array(frameTable.line),
+      column: toInt32Array(frameTable.column),
+      originalLocation: toInt32Array(frameTable.originalLocation),
+    },
+    funcTable: {
+      length: funcTable.length,
+      flags: toUint8Array(funcTable.flags),
+      name: toInt32Array(funcTable.name),
+      resource: toInt32Array(funcTable.resource),
+      source: toInt32Array(funcTable.source),
+      lineNumber: toInt32Array(funcTable.lineNumber),
+      columnNumber: toInt32Array(funcTable.columnNumber),
+      originalLocation: toInt32Array(funcTable.originalLocation),
+    },
+    nativeSymbols:
+      computeNativeSymbolTableFromRawNativeSymbolTable(nativeSymbols),
+  };
+}
+
+function convertThreadEligibleColumns(thread: RawThread): RawThread {
+  const newThread: RawThread = {
+    ...thread,
+    samples: convertSamplesTimesToTypedArrays(thread.samples),
+    markers: convertMarkersEligibleColumnsToTypedArrays(thread.markers),
+  };
+  if (thread.jsAllocations !== undefined) {
+    newThread.jsAllocations = {
+      ...thread.jsAllocations,
+      time: toFloat64Array(thread.jsAllocations.time),
+    };
+  }
+  if (thread.nativeAllocations !== undefined) {
+    newThread.nativeAllocations = {
+      ...thread.nativeAllocations,
+      time: toFloat64Array(thread.nativeAllocations.time),
+    };
+  }
+  return newThread;
+}
+
+function convertSamplesTimesToTypedArrays(
+  samples: RawSamplesTable
+): RawSamplesTable {
+  const result = { ...samples };
+  if (samples.time !== undefined) {
+    result.time = toFloat64Array(samples.time);
+  }
+  if (samples.timeDeltas !== undefined) {
+    result.timeDeltas = toFloat64Array(samples.timeDeltas);
+  }
+  return result;
+}
+
+function convertMarkersEligibleColumnsToTypedArrays(
+  markers: RawMarkerTable
+): RawMarkerTable {
+  return {
+    ...markers,
+    startTime: toFloat64ArraySetNullToZero(markers.startTime),
+    endTime: toFloat64ArraySetNullToZero(markers.endTime),
+  };
+}
+
+function convertCounterEligibleColumns(counter: RawCounter): RawCounter {
+  const samples: RawCounterSamplesTable = { ...counter.samples };
+  if (counter.samples.time !== undefined) {
+    samples.time = toFloat64Array(counter.samples.time);
+  }
+  if (counter.samples.timeDeltas !== undefined) {
+    samples.timeDeltas = toFloat64Array(counter.samples.timeDeltas);
+  }
+  return { ...counter, samples };
+}
+
+/**
+ * Take a profile and convert it to a Uint8Array in the JsonSlabs format.
+ *
+ * This is more efficient than JSON if the profile contains large typed arrays.
+ */
+export function serializeProfileToJsonSlabsFile(
+  profile: Profile
+): Uint8Array<ArrayBuffer> {
+  // Encode the profile object with the binary JsonSlabs container format.
+  return encodeJsonSlabs(profile, [
+    // "Split-out" slabs:
+    //
+    // This second argument to the encode function is an array of objects which
+    // should be pulled out into their own dedicated slabs. This is totally
+    // optional and doesn't change what the decoded object will look like.
+    // We use it to "split out" some large tables as long as we haven't converted
+    // them to use typed arrays. This already gives us a benefit: It means that
+    // decoding will use several JSON.parse calls rather than just one single
+    // JSON.parse call, and each individual JSON.parse will act on a smaller
+    // string, which means it's less likely to hit any string size limits.
+    //
+    // As we convert more and more tables / columns to typed arrays, the "skeleton
+    // JSON" for these tables will become much smaller and we won't need to split
+    // out those tables anymore.
+    profile.threads,
+    profile.shared.frameTable,
+    profile.shared.funcTable,
+    profile.shared.stringArray,
+  ]);
 }
 
 // If applicable, this function will try to "fix" a processed profile that was
@@ -1913,6 +2465,41 @@ function attemptToFixProcessedProfileThroughMutation(
   return profile;
 }
 
+function decodeUtf8WithNiceError(bytes: Uint8Array): string {
+  try {
+    const textDecoder = new TextDecoder(undefined, { fatal: true });
+    return textDecoder.decode(bytes);
+  } catch (e) {
+    console.error('Source exception:', e);
+    throw new Error(
+      'The profile array buffer could not be parsed as a UTF-8 string.'
+    );
+  }
+}
+
+async function parseJSONFromBytes(bytes: Uint8Array): Promise<any> {
+  const V8_STRING_MAX_SIZE = 512 * 1024 * 1024 - 24; // 512 MiB - 24
+  if (bytes.byteLength < V8_STRING_MAX_SIZE) {
+    const jsonString = decodeUtf8WithNiceError(bytes);
+    return JSON.parse(jsonString);
+  }
+
+  // The payload is too large to fit in a single string (in V8), so we can't decode
+  // it and call JSON.parse on it. Use a streaming JSON parser instead. This is
+  // much slower than native JSON.parse, so we only do it when necessary.
+  const { JSONParser } = await import('@streamparser/json');
+  const parser = new JSONParser({ paths: ['$'] });
+  let result: any;
+  parser.onValue = ({ value }) => {
+    result = value;
+  };
+  parser.write(bytes);
+  if (!parser.isEnded) {
+    throw new Error('Input terminated before end of JSON');
+  }
+  return result;
+}
+
 /**
  * Take some arbitrary profile file from some data source, and turn it into
  * the processed profile format.
@@ -1934,10 +2521,12 @@ export async function unserializeProfileOfArbitraryFormat(
   upgradeInfo: ProfileUpgradeInfo = {}
 ): Promise<Profile> {
   try {
-    // We used to use `instanceof ArrayBuffer`, but this doesn't work when the
-    // object is constructed from an ArrayBuffer in a different context... which
-    // happens in our tests.
-    if (String(arbitraryFormat) === '[object ArrayBuffer]') {
+    // We use Object.prototype.toString instead of `instanceof ArrayBuffer`
+    // because instanceof doesn't work cross-realm (e.g. in tests), and we
+    // can't use String() since that serializes the full contents of a Uint8Array.
+    if (
+      Object.prototype.toString.call(arbitraryFormat) === '[object ArrayBuffer]'
+    ) {
       const arrayBuffer = arbitraryFormat as ArrayBuffer;
       arbitraryFormat = new Uint8Array(arrayBuffer);
     }
@@ -1954,27 +2543,51 @@ export async function unserializeProfileOfArbitraryFormat(
         profileBytes = await decompress(profileBytes);
       }
 
-      if (isArtTraceFormat(profileBytes)) {
+      if (isJsonSlabsFile(profileBytes)) {
+        arbitraryFormat = decodeJsonSlabs(profileBytes);
+      } else if (isArtTraceFormat(profileBytes)) {
         arbitraryFormat = convertArtTraceProfile(profileBytes);
       } else if (verifyMagic(SIMPLEPERF_MAGIC, profileBytes)) {
         const { convertSimpleperfTraceProfile } =
           await import('./import/simpleperf');
         arbitraryFormat = convertSimpleperfTraceProfile(profileBytes);
       } else {
-        try {
-          const textDecoder = new TextDecoder(undefined, { fatal: true });
-          arbitraryFormat = await textDecoder.decode(profileBytes);
-        } catch (e) {
-          console.error('Source exception:', e);
-          throw new Error(
-            'The profile array buffer could not be parsed as a UTF-8 string.'
+        // Probably a string-based format.
+        // We don't want to materialize a string for the entire profileBytes
+        // here, in case we want to use the streaming JSON parser later. But
+        // to detect perf script + flamegraph, we need to look at some text,
+        // so let's decode the first 4096 bytes and detect the format based
+        // on the first one or two lines.
+        const CHARCODE_LINE_BREAK = 10; // '\n'.charCodeAt(0)
+        const firstPage = profileBytes.subarray(0, 4096);
+        const firstLineBreakPos = firstPage.indexOf(CHARCODE_LINE_BREAK);
+        const secondLineBreakPos =
+          firstLineBreakPos !== -1
+            ? firstPage.indexOf(CHARCODE_LINE_BREAK, firstLineBreakPos + 1)
+            : -1;
+        const sniffEnd =
+          secondLineBreakPos !== -1 ? secondLineBreakPos : firstPage.byteLength;
+        // Non-fatal: the cut may fall inside a multi-byte UTF-8 sequence;
+        // we only need enough text to recognize the format.
+        const firstTwoLinesAsText = new TextDecoder().decode(
+          firstPage.subarray(0, sniffEnd)
+        );
+        if (isPerfScriptFormat(firstTwoLinesAsText)) {
+          arbitraryFormat = convertPerfScriptProfile(
+            decodeUtf8WithNiceError(profileBytes)
           );
+        } else if (isFlameGraphFormat(firstTwoLinesAsText)) {
+          arbitraryFormat = convertFlameGraphProfile(
+            decodeUtf8WithNiceError(profileBytes)
+          );
+        } else {
+          // Try parsing as JSON.
+          arbitraryFormat = await parseJSONFromBytes(profileBytes);
         }
       }
     }
 
     if (typeof arbitraryFormat === 'string') {
-      // The profile could be JSON or the output from `perf script`. Try `perf script` first.
       if (isPerfScriptFormat(arbitraryFormat)) {
         arbitraryFormat = convertPerfScriptProfile(arbitraryFormat);
       } else if (isFlameGraphFormat(arbitraryFormat)) {
@@ -2003,7 +2616,7 @@ export async function unserializeProfileOfArbitraryFormat(
       profileUrl
     );
     if (processedChromeProfile) {
-      return processedChromeProfile;
+      return await processedChromeProfile;
     }
 
     const processedDhat = attemptToConvertDhat(json);
@@ -2015,6 +2628,11 @@ export async function unserializeProfileOfArbitraryFormat(
     return processGeckoOrDevToolsProfile(json);
   } catch (e) {
     console.error('UnserializationError:', e);
+    // A version mismatch is already a clear, user-facing error. Re-throw it
+    // as-is so each frontend can detect it and add its own update advice.
+    if (e instanceof ProfileVersionError) {
+      throw e;
+    }
     throw new Error(`Unserializing the profile failed: ${e}`);
   }
 }
@@ -2066,8 +2684,15 @@ export function processVisualMetrics(
     (cat) => cat.name === 'Test'
   );
 
+  const mainThreadMarkers = getRawMarkerTableBuilderFromExisting(
+    mainThread.markers
+  );
+  const tabThreadMarkers = getRawMarkerTableBuilderFromExisting(
+    tabThread.markers
+  );
+
   function maybeAddMetricMarker(
-    thread: RawThread,
+    markers: RawMarkerTableBuilder,
     name: string,
     phase: MarkerPhase,
     startTime: number | null,
@@ -2085,14 +2710,13 @@ export function processVisualMetrics(
       // browsertime bug here: https://github.com/sitespeedio/browsertime/issues/1746.
       return;
     }
-    // Add the marker to the given thread.
-    thread.markers.name.push(stringTable.indexForString(name));
-    thread.markers.startTime.push(startTime);
-    thread.markers.endTime.push(endTime);
-    thread.markers.phase.push(phase);
-    thread.markers.category.push(testingCategoryIdx);
-    thread.markers.data.push(payload ?? null);
-    thread.markers.length++;
+    markers.name.push(stringTable.indexForString(name));
+    markers.startTime.push(startTime);
+    markers.endTime.push(endTime);
+    markers.phase.push(phase);
+    markers.category.push(testingCategoryIdx);
+    markers.data.push(payload ?? null);
+    markers.length++;
   }
 
   // Find the navigation start time in the tab thread for specifying the marker
@@ -2101,12 +2725,12 @@ export function processVisualMetrics(
   if (stringTable.hasString('Navigation::Start')) {
     const navigationStartStrIdx =
       stringTable.indexForString('Navigation::Start');
-    const navigationStartMarkerIdx = tabThread.markers.name.findIndex(
+    const navigationStartMarkerIdx = tabThreadMarkers.name.findIndex(
       (m) => m === navigationStartStrIdx
     );
     if (navigationStartMarkerIdx !== -1) {
       navigationStartTime =
-        tabThread.markers.startTime[navigationStartMarkerIdx];
+        tabThreadMarkers.startTime[navigationStartMarkerIdx];
     }
   }
 
@@ -2123,9 +2747,21 @@ export function processVisualMetrics(
 
     // Add the progress marker to the parent process main thread.
     const markerName = `${metricName} Progress`;
-    maybeAddMetricMarker(mainThread, markerName, INTERVAL, startTime, endTime);
+    maybeAddMetricMarker(
+      mainThreadMarkers,
+      markerName,
+      INTERVAL,
+      startTime,
+      endTime
+    );
     // Add the progress marker to the tab process main thread.
-    maybeAddMetricMarker(tabThread, markerName, INTERVAL, startTime, endTime);
+    maybeAddMetricMarker(
+      tabThreadMarkers,
+      markerName,
+      INTERVAL,
+      startTime,
+      endTime
+    );
 
     // Add progress markers for every visual progress change for more fine grained information.
     const progressMarkerSchema: MarkerSchema = {
@@ -2148,7 +2784,7 @@ export function processVisualMetrics(
 
       // Add it to the parent process main thread.
       maybeAddMetricMarker(
-        mainThread,
+        mainThreadMarkers,
         changeMarkerName,
         INSTANT,
         timestamp,
@@ -2157,7 +2793,7 @@ export function processVisualMetrics(
       );
       // Add it to the tab process main thread.
       maybeAddMetricMarker(
-        tabThread,
+        tabThreadMarkers,
         changeMarkerName,
         INSTANT,
         timestamp,
@@ -2166,6 +2802,9 @@ export function processVisualMetrics(
       );
     }
   }
+
+  mainThread.markers = finishRawMarkerTableBuilder(mainThreadMarkers);
+  tabThread.markers = finishRawMarkerTableBuilder(tabThreadMarkers);
 }
 
 /**

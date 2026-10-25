@@ -11,14 +11,14 @@ import type {
   IndexIntoSamplesTable,
   Milliseconds,
   IndexIntoCallNodeTable,
-  SelectedState,
 } from 'firefox-profiler/types';
+import type { SampleRelations } from 'firefox-profiler/profile-logic/profile-data';
 import type { CallNodeInfo } from 'firefox-profiler/profile-logic/call-node-info';
 
 type Props = {
   readonly className: string;
   readonly thread: Thread;
-  readonly samplesSelectedStates: null | SelectedState[];
+  readonly sampleRelations: SampleRelations;
   readonly sampleNonInvertedCallNodes: Array<IndexIntoCallNodeTable | null>;
   readonly interval: Milliseconds;
   readonly rangeStart: Milliseconds;
@@ -50,7 +50,7 @@ export class ThreadStackGraph extends PureComponent<Props> {
     const {
       className,
       thread,
-      samplesSelectedStates,
+      sampleRelations,
       interval,
       rangeStart,
       rangeEnd,
@@ -76,7 +76,7 @@ export class ThreadStackGraph extends PureComponent<Props> {
         trackName={trackName}
         interval={interval}
         thread={thread}
-        samplesSelectedStates={samplesSelectedStates}
+        sampleRelations={sampleRelations}
         rangeStart={rangeStart}
         rangeEnd={rangeEnd}
         categories={categories}

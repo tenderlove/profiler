@@ -26,16 +26,20 @@ const EXTRA_HEADERS = {
 // Allowed hosts for dev server
 const ALLOWED_HOSTS = ['localhost', '.app.github.dev'];
 
-function isHostAllowed(hostHeader) {
+function isHostAllowed(hostHeader, boundHost) {
   if (!hostHeader) {
     return false;
   }
 
-  // Extract hostname without port
-  const hostname = hostHeader.split(':')[0];
+  // When binding to all interfaces, allow any host.
+  if (boundHost === '0.0.0.0' || boundHost === '::' || boundHost === '::0') {
+    return true;
+  }
 
-  // Check exact match or suffix match for wildcard patterns
-  return ALLOWED_HOSTS.some((allowedHost) => {
+  const hostname = hostHeader.split(':')[0];
+  const allowedHosts = [...ALLOWED_HOSTS, boundHost];
+
+  return allowedHosts.some((allowedHost) => {
     if (allowedHost.startsWith('.')) {
       // Wildcard pattern like '.app.github.dev'
       return hostname.endsWith(allowedHost);
@@ -52,6 +56,7 @@ export async function startDevServer(buildConfig, options = {}) {
     fallback = 'index.html',
     onServerStart,
     cleanDist = true,
+    extraWatchConfigs = [],
   } = options;
 
   // Clean dist directory first
@@ -62,6 +67,7 @@ export async function startDevServer(buildConfig, options = {}) {
   // Create build context for watching
   const buildContext = await esbuild.context(buildConfig);
   const { hosts, port: esbuildServerPort } = await buildContext.serve({
+    port: 0,
     host: '127.0.0.1',
     servedir: distDir,
     fallback: fallback ? path.join(distDir, fallback) : undefined,
@@ -72,10 +78,16 @@ export async function startDevServer(buildConfig, options = {}) {
   // Start watching for changes
   await buildContext.watch();
 
+  // Watch extra configs (no serving needed, just watch for rebuilds)
+  const extraContexts = await Promise.all(
+    extraWatchConfigs.map((config) => esbuild.context(config))
+  );
+  await Promise.all(extraContexts.map((ctx) => ctx.watch()));
+
   // Create HTTP server
   const server = http.createServer((req, res) => {
     // Validate Host header
-    if (!isHostAllowed(req.headers.host)) {
+    if (!isHostAllowed(req.headers.host, host)) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
       res.end('Invalid Host header');
       return;
@@ -86,7 +98,10 @@ export async function startDevServer(buildConfig, options = {}) {
       port: esbuildServerPort,
       path: req.url,
       method: req.method,
-      headers: req.headers,
+      headers: {
+        ...req.headers,
+        host: hostname + ':' + esbuildServerPort,
+      },
     };
 
     // Forward each incoming request to esbuild
@@ -121,11 +136,15 @@ export async function startDevServer(buildConfig, options = {}) {
   // Graceful shutdown
   let isShuttingDown = false;
   process.on('SIGINT', async () => {
-    if (isShuttingDown) return;
+    if (isShuttingDown) {
+      return;
+    }
     isShuttingDown = true;
 
     console.log('\nShutting down...');
-    await buildContext.dispose();
+    await Promise.all(
+      [buildContext, ...extraContexts].map((ctx) => ctx.dispose())
+    );
     server.close();
     process.exit(0);
   });

@@ -237,17 +237,6 @@ ErrorBoundary--report-error-to-developers-description = Relate este problema aos
 # This is used in a call to action button, displayed inside the error box.
 ErrorBoundary--report-error-on-github = Relatar o erro no GitHub
 
-## Footer Links
-
-FooterLinks--legal = Jurídico
-FooterLinks--Privacy = Privacidade
-FooterLinks--Cookies = Cookies
-FooterLinks--languageSwitcher--select =
-    .title = Mudar idioma
-FooterLinks--hide-button =
-    .title = Ocultar links de rodapé
-    .aria-label = Ocultar links de rodapé
-
 ## FullTimeline
 ## The timeline component of the full view in the analysis UI at the top of the
 ## page.
@@ -284,9 +273,13 @@ Home--enable-button-unavailable =
 # This message can be seen on https://main--perf-html.netlify.app/ .
 Home--web-channel-unavailable = Esta instância do profiler não conseguiu se conectar ao WebChannel. Isso geralmente significa que está sendo executado em um host diferente daquele especificado na preferência <code>devtools.performance.recording.ui-base-url</code>. Se você quiser capturar novos profiles com esta instância e dar a ela controle programático do botão de menu do profiler, pode ir em <code>about: config</code> e alterar a preferência.
 Home--record-instructions = Para iniciar a gravação de um profile, clique no botão de gravação de profile ou use os atalhos de teclado. O ícone fica azul quando um profile está sendo gravado. Use <kbd>Capturar</kbd> para carregar os dados no profiler.firefox.com.
-Home--instructions-content =
-    A gravação de profiles de desempenho requer o <a>{ -firefox-brand-name }</a>.
+Home--instructions-content2 =
+    A gravação de profiles de desempenho requer o <a>{ -firefox-brand-name } de computador</a>.
     No entanto, profiles existentes podem ser vistos em qualquer navegador moderno.
+Home--fenix-instructions-directly = É possível criar profiles do { -firefox-android-brand-name } diretamente neste dispositivo. Para mais informações, consulte <a>Como criar profiles do { -firefox-android-brand-name } diretamente no dispositivo</a>.
+Home--fenix-instructions-remotely =
+    Você também pode criar profiles do { -firefox-android-brand-name } remotamente a partir do { -firefox-brand-name } de computador. Para mais informações, consulte esta documentação:
+    <a>Como criar profiles do { -firefox-android-brand-name } remotamente</a>.
 Home--record-instructions-start-stop = Interrompa e inicie a gravação de profiles
 Home--record-instructions-capture-load = Capture e carregue um profile
 Home--profiler-motto = Capture um profile de desempenho. Analise. Compartilhe. Torne a web mais rápida.
@@ -301,12 +294,6 @@ Home--load-files-from-other-tools2 = O { -profiler-brand-name } também pode imp
 Home--install-chrome-extension = Instale a extensão para Chrome
 Home--chrome-extension-instructions = Use a <a>extensão { -profiler-brand-name } para Chrome</a> para capturar profiles de desempenho no Chrome e analisar no { -profiler-brand-name }. Instale a extensão a partir do Chrome Web Store.
 Home--chrome-extension-recording-instructions = Após instalar, use o ícone da extensão na barra de ferramentas ou os atalhos para iniciar e encerrar a gravação de profiles. Você também pode exportar profiles e carregar aqui para análises detalhadas.
-
-## IdleSearchField
-## The component that is used for all the search inputs in the application.
-
-IdleSearchField--search-input =
-    .placeholder = Insira termos de filtragem
 
 ## JsTracerSettings
 ## JSTracer is an experimental feature and it's currently disabled. See Bug 1565788.
@@ -419,8 +406,8 @@ MarkerTable--details = Detalhes
 # Variables:
 #   $filter (String) - Search string that will be used to filter the markers.
 MarkerTooltip--filter-button-tooltip =
-    .title = Mostrar apenas marcadores correspondentes a: “{ $filter }”
     .aria-label = Mostrar apenas marcadores correspondentes a: “{ $filter }”
+    .title = Mostrar apenas marcadores correspondentes a: “{ $filter }”
 
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
@@ -429,14 +416,9 @@ MenuButtons--index--metaInfo-button =
     .label = Informações do profile
 MenuButtons--index--full-view = Vista completa
 MenuButtons--index--cancel-upload = Cancelar envio
-MenuButtons--index--share-upload =
-    .label = Enviar profile local
-MenuButtons--index--share-re-upload =
-    .label = Reenviar
 MenuButtons--index--share-error-uploading =
     .label = Erro ao enviar
 MenuButtons--index--revert = Reverter para o profile original
-MenuButtons--index--docs = Documentação
 MenuButtons--permalink--button =
     .label = Link permanente
 
@@ -579,7 +561,6 @@ MenuButtons--publish--renderCheckbox-label-preference = Incluir valores de prefe
 MenuButtons--publish--renderCheckbox-label-private-browsing = Incluir os dados de janelas de navegação privativa
 MenuButtons--publish--renderCheckbox-label-private-browsing-warning-image =
     .title = Este profile contém dados de navegação privativa
-MenuButtons--publish--reupload-performance-profile = Reenviar profile de desempenho
 MenuButtons--publish--share-performance-profile = Compartilhar profile de desempenho
 MenuButtons--publish--info-description = Enviar seu profile e tornar acessível a qualquer pessoa que tenha o link.
 MenuButtons--publish--info-description-default = Por padrão, seus dados pessoais são removidos.
@@ -590,7 +571,6 @@ MenuButtons--publish--upload-title = Enviando profile…
 MenuButtons--publish--cancel-upload = Cancelar envio
 MenuButtons--publish--message-something-went-wrong = Ops, algo deu errado ao enviar o profile.
 MenuButtons--publish--message-try-again = Tentar novamente
-MenuButtons--publish--download = Baixar
 MenuButtons--publish--compressing = Compactando…
 MenuButtons--publish--error-while-compressing = Erro ao compactar, experimente desmarcar algumas opções para reduzir o tamanho do profile.
 
@@ -625,8 +605,8 @@ PanelSearch--search-field-hint = Você sabia que pode usar vírgula (,) para pes
 ProfileName--edit-profile-name-button =
     .title = Mudar o nome do profile
 ProfileName--edit-profile-name-input =
-    .title = Mudar o nome do profile
     .aria-label = Nome do profile
+    .title = Mudar o nome do profile
 
 ## Profile Delete Button
 
@@ -706,8 +686,8 @@ ServiceWorkerManager--updated-while-not-ready =
     ter sido totalmente carregada. Pode não funcionar direito.
 ServiceWorkerManager--new-version-is-ready = Uma nova versão do aplicativo foi baixada e está pronta para uso.
 ServiceWorkerManager--hide-notice-button =
-    .title = Ocultar o aviso de recarga
     .aria-label = Ocultar o aviso de recarga
+    .title = Ocultar o aviso de recarga
 
 ## StackSettings
 ## This is the settings component that is used in Call Tree, Flame Graph and Stack
@@ -796,15 +776,6 @@ TrackNameButton--hide-track =
 # This button appears when hovering a global track name and is displayed as an X icon.
 TrackNameButton--hide-process =
     .title = Ocultar processo
-
-## TrackMemoryGraph
-## This is used to show the memory graph of that process in the timeline part of
-## the UI. To learn more about it, visit:
-## https://profiler.firefox.com/docs/#/./memory-allocations?id=memory-track
-
-TrackMemoryGraph--relative-memory-at-this-time = memória relativa neste momento
-TrackMemoryGraph--memory-range-in-graph = intervalo de memória no gráfico
-TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample = alocações e desalocações desde a amostra anterior
 
 ## TrackPower
 ## This is used to show the power used by the CPU and other chips in a computer,

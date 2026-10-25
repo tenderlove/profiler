@@ -13,13 +13,16 @@ import {
 } from '../../profile-logic/call-tree';
 import { computeFlameGraphRows } from '../../profile-logic/flame-graph';
 import {
+  computeFrameTableFromRawFrameTable,
+  computeFuncTableFromRawFuncTable,
   getCallNodeInfo,
   getInvertedCallNodeInfo,
   getOriginAnnotationForFunc,
+  getOriginalPositionForFrame,
   filterRawThreadSamplesToRange,
   getSampleIndexToCallNodeIndex,
 } from '../../profile-logic/profile-data';
-import { resourceTypes } from '../../profile-logic/data-structures';
+import { ResourceType, FrameFlag, FuncFlag } from 'firefox-profiler/types';
 import {
   callTreeFromProfile,
   functionListTreeFromProfile,
@@ -362,7 +365,7 @@ describe('unfiltered call tree', function () {
         const callTree = callTreeFromProfile(profile);
         const hostStringIndex = stringTable.indexForString('examplecom.js');
 
-        profile.shared.resourceTable.type[0] = resourceTypes.webhost;
+        profile.shared.resourceTable.type[0] = ResourceType.Webhost;
         profile.shared.resourceTable.host[0] = hostStringIndex;
         // Hijack the string table to provide the proper host name
         stringTable._array[hostStringIndex] = 'http://example.com';
@@ -692,10 +695,14 @@ describe('origin annotation', function () {
     const resourceIndex = shared.resourceTable.length;
     const funcIndex = funcNames.indexOf(funcName);
     shared.funcTable.resource[funcIndex] = resourceIndex;
-    shared.funcTable.source[funcIndex] = location
-      ? addSourceToTable(shared.sources, stringTable.indexForString(location))
-      : null;
-    shared.resourceTable.lib.push(-1);
+    shared.funcTable.flags[funcIndex] |= FuncFlag.HasResource;
+    if (location) {
+      shared.funcTable.source[funcIndex] = addSourceToTable(
+        shared.sources,
+        stringTable.indexForString(location)
+      );
+      shared.funcTable.flags[funcIndex] |= FuncFlag.HasSource;
+    }
     shared.resourceTable.name.push(stringTable.indexForString(name));
     shared.resourceTable.host.push(
       host ? stringTable.indexForString(host) : null
@@ -724,7 +731,9 @@ describe('origin annotation', function () {
   function getOrigin(funcName: string): string {
     return getOriginAnnotationForFunc(
       funcNames.indexOf(funcName),
-      shared.funcTable,
+      null,
+      computeFrameTableFromRawFrameTable(shared.frameTable, undefined),
+      computeFuncTableFromRawFuncTable(shared.funcTable),
       shared.resourceTable,
       stringTable,
       shared.sources
@@ -747,5 +756,244 @@ describe('origin annotation', function () {
       'libxul.so: /home/user/mozilla-central/xul.cpp'
     );
     expect(getOrigin('D')).toEqual('libxul.so');
+  });
+});
+
+describe('getOriginAnnotationForFunc with originalLocation', function () {
+  function setup() {
+    const { profile, stringTable } = getProfileFromTextSamples(`A`);
+    const { shared } = profile;
+
+    const bundleIndex = addSourceToTable(
+      shared.sources,
+      stringTable.indexForString('http://example.com/bundle.js')
+    );
+    const originalIndex = addSourceToTable(
+      shared.sources,
+      stringTable.indexForString('http://example.com/original.ts')
+    );
+
+    // Wire the single func to the bundle and give it a compiled position.
+    shared.funcTable.source[0] = bundleIndex;
+    shared.funcTable.lineNumber[0] = 1;
+    shared.funcTable.columnNumber[0] = 100;
+    shared.funcTable.flags[0] |=
+      FuncFlag.HasSource | FuncFlag.HasLine | FuncFlag.HasColumn;
+
+    // The text sample produces one frame referencing func 0. Give it a
+    // compiled position so tier-3 fallback has something meaningful to surface.
+    shared.frameTable.flags[0] |= FrameFlag.HasLine | FrameFlag.HasColumn;
+    shared.frameTable.line[0] = 5;
+    shared.frameTable.column[0] = 10;
+
+    function addOriginalLocationRow(
+      source: number,
+      line: number,
+      column: number
+    ): number {
+      const idx = shared.sourceLocationTable.length;
+      shared.sourceLocationTable.source.push(source);
+      shared.sourceLocationTable.line.push(line);
+      shared.sourceLocationTable.column.push(column);
+      shared.sourceLocationTable.length++;
+      return idx;
+    }
+
+    function callOrigin(frameOriginalLocationIdx: number | null): string {
+      if (frameOriginalLocationIdx === null) {
+        shared.frameTable.flags[0] &= ~FrameFlag.HasOriginalLocation;
+        shared.frameTable.originalLocation[0] = 0;
+      } else {
+        shared.frameTable.flags[0] |= FrameFlag.HasOriginalLocation;
+        shared.frameTable.originalLocation[0] = frameOriginalLocationIdx;
+      }
+      return getOriginAnnotationForFunc(
+        0,
+        0,
+        computeFrameTableFromRawFrameTable(shared.frameTable, undefined),
+        computeFuncTableFromRawFuncTable(shared.funcTable),
+        shared.resourceTable,
+        stringTable,
+        shared.sources,
+        shared.sourceLocationTable
+      );
+    }
+
+    return {
+      shared,
+      originalIndex,
+      bundleIndex,
+      addOriginalLocationRow,
+      callOrigin,
+    };
+  }
+
+  it('uses the frame original position when both source and line are mapped', function () {
+    const { originalIndex, addOriginalLocationRow, callOrigin } = setup();
+    const idx = addOriginalLocationRow(originalIndex, 42, 7);
+    expect(callOrigin(idx)).toEqual('http://example.com/original.ts:42:7');
+  });
+
+  it('falls back to func mapping when the frame has no source-map entry', function () {
+    const { shared, originalIndex, addOriginalLocationRow, callOrigin } =
+      setup();
+    shared.funcTable.originalLocation[0] = addOriginalLocationRow(
+      originalIndex,
+      10,
+      4
+    );
+    shared.funcTable.flags[0] |= FuncFlag.HasOriginalLocation;
+    expect(callOrigin(null)).toEqual('http://example.com/original.ts:10:4');
+  });
+
+  it("uses the frame's compiled position when the frame has no source-map entry", function () {
+    const { callOrigin } = setup();
+    expect(callOrigin(null)).toEqual('http://example.com/bundle.js:5:10');
+  });
+});
+
+describe('getOriginalPositionForFrame', function () {
+  function setup() {
+    const { profile, stringTable } = getProfileFromTextSamples(`A`);
+    const { shared } = profile;
+
+    const bundleIndex = addSourceToTable(
+      shared.sources,
+      stringTable.indexForString('http://example.com/bundle.js')
+    );
+    const originalIndex = addSourceToTable(
+      shared.sources,
+      stringTable.indexForString('http://example.com/original.ts')
+    );
+
+    shared.funcTable.source[0] = bundleIndex;
+    shared.funcTable.lineNumber[0] = 1;
+    shared.funcTable.columnNumber[0] = 100;
+    shared.funcTable.flags[0] |=
+      FuncFlag.HasSource | FuncFlag.HasLine | FuncFlag.HasColumn;
+    shared.frameTable.flags[0] |= FrameFlag.HasLine | FrameFlag.HasColumn;
+    shared.frameTable.line[0] = 5;
+    shared.frameTable.column[0] = 10;
+
+    function addOriginalLocationRow(
+      source: number,
+      line: number,
+      column: number
+    ): number {
+      const idx = shared.sourceLocationTable.length;
+      shared.sourceLocationTable.source.push(source);
+      shared.sourceLocationTable.line.push(line);
+      shared.sourceLocationTable.column.push(column);
+      shared.sourceLocationTable.length++;
+      return idx;
+    }
+
+    return { shared, bundleIndex, originalIndex, addOriginalLocationRow };
+  }
+
+  it("returns the frame's source-mapped position when present (tier 1)", function () {
+    const { shared, originalIndex, addOriginalLocationRow } = setup();
+    shared.frameTable.flags[0] |= FrameFlag.HasOriginalLocation;
+    shared.frameTable.originalLocation[0] = addOriginalLocationRow(
+      originalIndex,
+      42,
+      7
+    );
+    expect(
+      getOriginalPositionForFrame(
+        0,
+        0,
+        computeFrameTableFromRawFrameTable(shared.frameTable, undefined),
+        computeFuncTableFromRawFuncTable(shared.funcTable),
+        shared.sourceLocationTable
+      )
+    ).toEqual({ source: originalIndex, line: 42, column: 7 });
+  });
+
+  it("falls back to the func's source-mapped position when the frame has no source-map entry (tier 2)", function () {
+    const { shared, originalIndex, addOriginalLocationRow } = setup();
+    shared.funcTable.originalLocation[0] = addOriginalLocationRow(
+      originalIndex,
+      10,
+      4
+    );
+    shared.funcTable.flags[0] |= FuncFlag.HasOriginalLocation;
+    expect(
+      getOriginalPositionForFrame(
+        0,
+        0,
+        computeFrameTableFromRawFrameTable(shared.frameTable, undefined),
+        computeFuncTableFromRawFuncTable(shared.funcTable),
+        shared.sourceLocationTable
+      )
+    ).toEqual({ source: originalIndex, line: 10, column: 4 });
+  });
+
+  it("falls back to the frame's compiled position when no source-map info applies (tier 3)", function () {
+    const { shared, bundleIndex } = setup();
+    expect(
+      getOriginalPositionForFrame(
+        0,
+        0,
+        computeFrameTableFromRawFrameTable(shared.frameTable, undefined),
+        computeFuncTableFromRawFuncTable(shared.funcTable),
+        shared.sourceLocationTable
+      )
+    ).toEqual({ source: bundleIndex, line: 5, column: 10 });
+  });
+
+  it("falls back to the func's compiled line/column when the frame's are null", function () {
+    const { shared, bundleIndex } = setup();
+    shared.frameTable.flags[0] &= ~(FrameFlag.HasLine | FrameFlag.HasColumn);
+    shared.frameTable.line[0] = 0;
+    shared.frameTable.column[0] = 0;
+    expect(
+      getOriginalPositionForFrame(
+        0,
+        0,
+        computeFrameTableFromRawFrameTable(shared.frameTable, undefined),
+        computeFuncTableFromRawFuncTable(shared.funcTable),
+        shared.sourceLocationTable
+      )
+    ).toEqual({ source: bundleIndex, line: 1, column: 100 });
+  });
+
+  it("uses the func's position when frameIndex is null (tooltip/call-node sites)", function () {
+    const { shared, originalIndex, addOriginalLocationRow } = setup();
+    shared.funcTable.originalLocation[0] = addOriginalLocationRow(
+      originalIndex,
+      10,
+      4
+    );
+    shared.funcTable.flags[0] |= FuncFlag.HasOriginalLocation;
+    expect(
+      getOriginalPositionForFrame(
+        null,
+        0,
+        computeFrameTableFromRawFrameTable(shared.frameTable, undefined),
+        computeFuncTableFromRawFuncTable(shared.funcTable),
+        shared.sourceLocationTable
+      )
+    ).toEqual({ source: originalIndex, line: 10, column: 4 });
+  });
+
+  it('treats originalLocation = null as no symbolication available', function () {
+    const { shared, bundleIndex, originalIndex, addOriginalLocationRow } =
+      setup();
+    shared.funcTable.originalLocation[0] = addOriginalLocationRow(
+      originalIndex,
+      10,
+      4
+    );
+    shared.funcTable.flags[0] |= FuncFlag.HasOriginalLocation;
+    expect(
+      getOriginalPositionForFrame(
+        0,
+        0,
+        computeFrameTableFromRawFrameTable(shared.frameTable, undefined),
+        computeFuncTableFromRawFuncTable(shared.funcTable),
+        null
+      )
+    ).toEqual({ source: bundleIndex, line: 5, column: 10 });
   });
 });

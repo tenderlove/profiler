@@ -13,6 +13,7 @@ import { oneLine } from 'common-tags';
 import type { Profile, State, Pid } from 'firefox-profiler/types';
 
 import { StringTable } from '../../../utils/string-table';
+import { getRawMarkerTableBuilderFromExisting } from '../../../profile-logic/data-structures';
 import { INSTANT } from 'firefox-profiler/app-logic/constants';
 
 /**
@@ -88,22 +89,11 @@ export function getHumanReadableTracks(state: State): string[] {
       for (const trackIndex of trackOrder) {
         const track = tracks[trackIndex];
         let trackName;
-        if (track.type === 'memory') {
-          trackName = profileViewSelectors
+        if (track.type === 'counter') {
+          const counter = profileViewSelectors
             .getCounterSelectors(track.counterIndex)
-            .getPid(state);
-        } else if (track.type === 'bandwidth') {
-          trackName = profileViewSelectors
-            .getCounterSelectors(track.counterIndex)
-            .getPid(state);
-        } else if (track.type === 'process-cpu') {
-          trackName = profileViewSelectors
-            .getCounterSelectors(track.counterIndex)
-            .getPid(state);
-        } else if (track.type === 'power') {
-          trackName = profileViewSelectors
-            .getCounterSelectors(track.counterIndex)
-            .getCounter(state).name;
+            .getCounter(state);
+          trackName = counter.display.label || counter.name;
         } else if (track.type === 'marker') {
           trackName = stringArray[track.markerName];
         } else {
@@ -152,19 +142,21 @@ export function getProfileWithNiceTracks(): Profile {
   thread2.tid = 22;
 
   // Add a refresh driver tick so that this thread will not be idle.
-  thread2.markers.data.push({
+  const thread2Markers = getRawMarkerTableBuilderFromExisting(thread2.markers);
+  thread2.markers = thread2Markers;
+  thread2Markers.data.push({
     type: 'tracing',
     category: 'Paint',
   });
-  thread2.markers.category.push(0);
+  thread2Markers.category.push(0);
   const thread2StringTable = StringTable.withBackingArray(shared.stringArray);
-  thread2.markers.name.push(
+  thread2Markers.name.push(
     thread2StringTable.indexForString('RefreshDriverTick')
   );
-  thread2.markers.startTime.push(0);
-  thread2.markers.endTime.push(null);
-  thread2.markers.phase.push(INSTANT);
-  thread2.markers.length++;
+  thread2Markers.startTime.push(0);
+  thread2Markers.endTime.push(null);
+  thread2Markers.phase.push(INSTANT);
+  thread2Markers.length++;
 
   thread3.name = 'DOM Worker';
   thread3.pid = '222';
@@ -295,8 +287,9 @@ export function getStoreWithMemoryTrack(pid: Pid = '222') {
     thread.name = 'GeckoMain';
     thread.isMainThread = true;
     thread.pid = pid;
-    const counter = getCounterForThread(thread, threadIndex);
-    counter.category = 'Memory';
+    const counter = getCounterForThread(thread, threadIndex, {
+      category: 'Memory',
+    });
     profile.counters = [counter];
   }
 
@@ -306,8 +299,8 @@ export function getStoreWithMemoryTrack(pid: Pid = '222') {
     trackReference
   );
 
-  if (localTrack.type !== 'memory') {
-    throw new Error('Expected a memory track.');
+  if (localTrack.type !== 'counter') {
+    throw new Error('Expected a counter track.');
   }
   return { store, ...store, profile, trackReference, localTrack, threadIndex };
 }

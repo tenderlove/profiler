@@ -3,7 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 import { PureComponent } from 'react';
 import classNames from 'classnames';
-import { ensureExists } from 'firefox-profiler/utils/types';
 import { timeCode } from 'firefox-profiler/utils/time-code';
 import { getSampleIndexClosestToStartTime } from 'firefox-profiler/profile-logic/profile-data';
 import { bisectionRight } from 'firefox-profiler/utils/bisect';
@@ -15,15 +14,15 @@ import type {
   CategoryList,
   IndexIntoSamplesTable,
   Milliseconds,
-  SelectedState,
 } from 'firefox-profiler/types';
+import type { SampleRelations } from 'firefox-profiler/profile-logic/profile-data';
 
 type Props = {
   readonly heightFunc: (param: IndexIntoSamplesTable) => number | null;
   readonly maxValue: number;
   readonly className: string;
   readonly thread: Thread;
-  readonly samplesSelectedStates: null | SelectedState[];
+  readonly sampleRelations: SampleRelations;
   readonly interval: Milliseconds;
   readonly rangeStart: Milliseconds;
   readonly rangeEnd: Milliseconds;
@@ -39,8 +38,9 @@ type Props = {
 
 export class ThreadHeightGraph extends PureComponent<Props> {
   _canvas: null | HTMLCanvasElement = null;
-  _takeCanvasRef = (canvas: HTMLCanvasElement | null) =>
-    (this._canvas = canvas);
+  _takeCanvasRef = (canvas: HTMLCanvasElement | null) => {
+    this._canvas = canvas;
+  };
   _resizeListener = () => this.forceUpdate();
 
   _renderCanvas() {
@@ -64,7 +64,7 @@ export class ThreadHeightGraph extends PureComponent<Props> {
   drawCanvas(canvas: HTMLCanvasElement) {
     const {
       thread,
-      samplesSelectedStates,
+      sampleRelations,
       interval,
       rangeStart,
       rangeEnd,
@@ -105,6 +105,8 @@ export class ThreadHeightGraph extends PureComponent<Props> {
       firstDrawnSampleIndex
     );
 
+    const idleCategoryIndex = categories.findIndex((c) => c.name === 'Idle');
+
     // Do one pass over the samples array to gather the samples we want to draw.
     const regularSamples = {
       height: [] as number[],
@@ -127,6 +129,11 @@ export class ThreadHeightGraph extends PureComponent<Props> {
       if (sampleTime < nextMinTime) {
         continue;
       }
+
+      if (sampleRelations.isFilteredOut(i)) {
+        continue;
+      }
+
       const heightFuncResult = heightFunc(i);
       if (heightFuncResult === null) {
         continue;
@@ -136,19 +143,11 @@ export class ThreadHeightGraph extends PureComponent<Props> {
 
       const xPos = (sampleTime - range[0]) * xPixelsPerMs;
       let samplesBucket;
-      if (
-        samplesSelectedStates !== null &&
-        samplesSelectedStates[i] === 'SELECTED'
-      ) {
+      if (sampleRelations.contributesToTotal(i)) {
         samplesBucket = highlightedSamples;
       } else {
-        const stackIndex = ensureExists(
-          thread.samples.stack[i],
-          'A stack must exist for this sample, since a callNodeIndex exists.'
-        );
-        const categoryIndex = thread.stackTable.category[stackIndex];
-        const category = categories[categoryIndex];
-        if (category.name === 'Idle') {
+        const categoryIndex = thread.samples.category[i];
+        if (categoryIndex === idleCategoryIndex) {
           samplesBucket = idleSamples;
         } else {
           samplesBucket = regularSamples;

@@ -173,6 +173,20 @@ exports[`CombinedChart renders combined stack chart 1`] = `
           class="photon-label photon-label-micro photon-label-horiz-padding"
         >
           <input
+            checked=""
+            class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
+            type="checkbox"
+          />
+          <span
+            title="Uncheck to hide samples whose leaf frame is in the Idle category."
+          >
+            Include idle samples
+          </span>
+        </label>
+        <label
+          class="photon-label photon-label-micro photon-label-horiz-padding"
+        >
+          <input
             class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
             type="checkbox"
           />
@@ -202,7 +216,7 @@ exports[`CombinedChart renders combined stack chart 1`] = `
           <input
             class="idleSearchFieldInput photon-input"
             name="search"
-            placeholder="Enter filter terms"
+            placeholder="Enter filter terms (/)"
             required=""
             title="Only display stacks which contain a function whose name matches this substring"
             type="search"
@@ -678,6 +692,20 @@ exports[`MarkerChart matches the snapshots for the component and draw log 1`] = 
           class="photon-label photon-label-micro photon-label-horiz-padding"
         >
           <input
+            checked=""
+            class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
+            type="checkbox"
+          />
+          <span
+            title="Uncheck to hide samples whose leaf frame is in the Idle category."
+          >
+            Include idle samples
+          </span>
+        </label>
+        <label
+          class="photon-label photon-label-micro photon-label-horiz-padding"
+        >
+          <input
             class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
             type="checkbox"
           />
@@ -707,7 +735,7 @@ exports[`MarkerChart matches the snapshots for the component and draw log 1`] = 
           <input
             class="idleSearchFieldInput photon-input"
             name="search"
-            placeholder="Enter filter terms"
+            placeholder="Enter filter terms (/)"
             required=""
             title="Only display stacks which contain a function whose name matches this substring"
             type="search"
@@ -1237,6 +1265,20 @@ exports[`StackChart matches the snapshot and can display a tooltip with the same
               class="photon-label photon-label-micro photon-label-horiz-padding"
             >
               <input
+                checked=""
+                class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
+                type="checkbox"
+              />
+              <span
+                title="Uncheck to hide samples whose leaf frame is in the Idle category."
+              >
+                Include idle samples
+              </span>
+            </label>
+            <label
+              class="photon-label photon-label-micro photon-label-horiz-padding"
+            >
+              <input
                 class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
                 type="checkbox"
               />
@@ -1266,7 +1308,7 @@ exports[`StackChart matches the snapshot and can display a tooltip with the same
               <input
                 class="idleSearchFieldInput photon-input"
                 name="search"
-                placeholder="Enter filter terms"
+                placeholder="Enter filter terms (/)"
                 required=""
                 title="Only display stacks which contain a function whose name matches this substring"
                 type="search"
@@ -1943,6 +1985,20 @@ exports[`StackChart matches the snapshot and can display a tooltip: dom 1`] = `
           class="photon-label photon-label-micro photon-label-horiz-padding"
         >
           <input
+            checked=""
+            class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
+            type="checkbox"
+          />
+          <span
+            title="Uncheck to hide samples whose leaf frame is in the Idle category."
+          >
+            Include idle samples
+          </span>
+        </label>
+        <label
+          class="photon-label photon-label-micro photon-label-horiz-padding"
+        >
+          <input
             class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
             type="checkbox"
           />
@@ -1972,7 +2028,7 @@ exports[`StackChart matches the snapshot and can display a tooltip: dom 1`] = `
           <input
             class="idleSearchFieldInput photon-input"
             name="search"
-            placeholder="Enter filter terms"
+            placeholder="Enter filter terms (/)"
             required=""
             title="Only display stacks which contain a function whose name matches this substring"
             type="search"
@@ -2478,6 +2534,20 @@ exports[`StackChart works when the user selects the JS allocations option 1`] = 
               class="photon-label photon-label-micro photon-label-horiz-padding"
             >
               <input
+                checked=""
+                class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
+                type="checkbox"
+              />
+              <span
+                title="Uncheck to hide samples whose leaf frame is in the Idle category."
+              >
+                Include idle samples
+              </span>
+            </label>
+            <label
+              class="photon-label photon-label-micro photon-label-horiz-padding"
+            >
+              <input
                 class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
                 type="checkbox"
               />
@@ -2507,7 +2577,7 @@ exports[`StackChart works when the user selects the JS allocations option 1`] = 
               <input
                 class="idleSearchFieldInput photon-input"
                 name="search"
-                placeholder="Enter filter terms"
+                placeholder="Enter filter terms (/)"
                 required=""
                 title="Only display stacks which contain a function whose name matches this substring"
                 type="search"

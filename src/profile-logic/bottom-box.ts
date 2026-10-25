@@ -2,20 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { resourceTypes } from './data-structures';
+import { FrameFlag } from 'firefox-profiler/types';
 
 import type {
   Thread,
   IndexIntoStackTable,
   IndexIntoCallNodeTable,
+  IndexIntoFuncTable,
   BottomBoxInfo,
   SamplesLikeTable,
 } from 'firefox-profiler/types';
 import type { CallNodeInfo } from './call-node-info';
 import {
   getCallNodeFramePerStack,
+  getFunctionFramePerStack,
   getNativeSymbolInfo,
   getNativeSymbolsForCallNode,
+  getOriginalPositionForFrame,
   getTotalNativeSymbolTimingsForCallNode,
 } from './profile-data';
 import { mapGetKeyWithMaxValue } from 'firefox-profiler/utils';
@@ -36,22 +39,17 @@ export function getBottomBoxInfoForCallNode(
   thread: Thread,
   samples: SamplesLikeTable
 ): BottomBoxInfo {
-  const {
-    stackTable,
-    frameTable,
-    funcTable,
-    stringTable,
-    resourceTable,
-    nativeSymbols,
-  } = thread;
+  const { stackTable, frameTable, funcTable, stringTable, nativeSymbols } =
+    thread;
 
   const funcIndex = callNodeInfo.funcForNode(callNodeIndex);
-  const sourceIndex = funcTable.source[funcIndex];
-  const resource = funcTable.resource[funcIndex];
-  const libIndex =
-    resource !== -1 && resourceTable.type[resource] === resourceTypes.library
-      ? resourceTable.lib[resource]
-      : null;
+  const { source: sourceIndex, line: funcLine } = getOriginalPositionForFrame(
+    null,
+    funcIndex,
+    frameTable,
+    funcTable,
+    thread.sourceLocationTable
+  );
   const callNodeFramePerStack = getCallNodeFramePerStack(
     callNodeIndex,
     callNodeInfo,
@@ -98,13 +96,16 @@ export function getBottomBoxInfoForCallNode(
   );
 
   // Compute the hottest line and instruction address, so we can ask the
-  // source and assembly view to scroll those into view.
-  const funcLine = funcTable.lineNumber[funcIndex];
+  // source and assembly view to scroll those into view. funcLine and the per-sample
+  // frame lines come from getOriginalPositionForFrame, so the scroll target lines
+  // up with the (original) source view's line numbering when symbolicated.
   const lineTimings = getTotalLineTimingsForCallNode(
     samples,
     callNodeFramePerStack,
     frameTable,
-    funcLine
+    funcTable,
+    funcLine,
+    thread.sourceLocationTable
   );
   const hottestLine = mapGetKeyWithMaxValue(lineTimings);
   const addressTimings = getTotalAddressTimingsForCallNode(
@@ -116,7 +117,6 @@ export function getBottomBoxInfoForCallNode(
   const hottestInstructionAddress = mapGetKeyWithMaxValue(addressTimings);
 
   return {
-    libIndex,
     sourceIndex,
     nativeSymbols: nativeSymbolInfosForCallNode,
     initialNativeSymbol:
@@ -138,54 +138,137 @@ export function getBottomBoxInfoForStackFrame(
   stackIndex: IndexIntoStackTable,
   thread: Thread
 ): BottomBoxInfo {
-  const {
-    stackTable,
-    frameTable,
-    funcTable,
-    resourceTable,
-    nativeSymbols,
-    stringTable,
-  } = thread;
+  const { stackTable, frameTable, funcTable, nativeSymbols, stringTable } =
+    thread;
 
   const frameIndex = stackTable.frame[stackIndex];
   const funcIndex = frameTable.func[frameIndex];
-  const sourceIndex = funcTable.source[funcIndex];
-  const resource = funcTable.resource[funcIndex];
-  const libIndex =
-    resource !== -1 && resourceTable.type[resource] === resourceTypes.library
-      ? resourceTable.lib[resource]
-      : null;
-
+  const { source: sourceIndex, line: lineNumber } = getOriginalPositionForFrame(
+    frameIndex,
+    funcIndex,
+    frameTable,
+    funcTable,
+    thread.sourceLocationTable
+  );
   // Get native symbol for this frame
-  const nativeSymbol = frameTable.nativeSymbol[frameIndex];
-  const nativeSymbolInfos =
-    nativeSymbol !== null
-      ? [
-          getNativeSymbolInfo(
-            nativeSymbol,
-            nativeSymbols,
-            frameTable,
-            stringTable
-          ),
-        ]
-      : [];
+  const frameFlags = frameTable.flags[frameIndex];
+  const hasNativeSymbol = (frameFlags & FrameFlag.HasNativeSymbol) !== 0;
+  const nativeSymbolInfos = hasNativeSymbol
+    ? [
+        getNativeSymbolInfo(
+          frameTable.nativeSymbol[frameIndex],
+          nativeSymbols,
+          frameTable,
+          stringTable
+        ),
+      ]
+    : [];
 
-  const instructionAddress =
-    nativeSymbol !== null ? frameTable.address[frameIndex] : -1;
-
-  // Extract line number from the frame
-  const lineNumber = frameTable.line[frameIndex];
+  const hasAddress =
+    hasNativeSymbol && (frameFlags & FrameFlag.HasAddress) !== 0;
+  const instructionAddress = hasAddress ? frameTable.address[frameIndex] : null;
 
   return {
-    libIndex,
     sourceIndex,
     nativeSymbols: nativeSymbolInfos,
     initialNativeSymbol: 0,
     scrollToLineNumber: lineNumber ?? undefined,
     highlightedLineNumber: lineNumber,
-    scrollToInstructionAddress:
-      instructionAddress !== -1 ? instructionAddress : undefined,
-    highlightedInstructionAddress:
-      instructionAddress !== -1 ? instructionAddress : null,
+    scrollToInstructionAddress: instructionAddress ?? undefined,
+    highlightedInstructionAddress: instructionAddress,
+  };
+}
+
+/**
+ * Calculate the BottomBoxInfo for a function, i.e. information about which
+ * things should be shown in the profiler UI's "bottom box" when a function is
+ * double-clicked in the function list.
+ *
+ * Unlike getBottomBoxInfoForCallNode, this considers all stacks where the
+ * function appears anywhere (not just as the self function), using the
+ * innermost (leaf-most) frame when the function appears multiple times in one
+ * stack due to recursion.
+ */
+export function getBottomBoxInfoForFunction(
+  funcIndex: IndexIntoFuncTable,
+  thread: Thread,
+  samples: SamplesLikeTable
+): BottomBoxInfo {
+  const { stackTable, frameTable, funcTable, stringTable, nativeSymbols } =
+    thread;
+
+  const { source: sourceIndex, line: funcLine } = getOriginalPositionForFrame(
+    null,
+    funcIndex,
+    frameTable,
+    funcTable,
+    thread.sourceLocationTable
+  );
+
+  const funcFramePerStack = getFunctionFramePerStack(
+    funcIndex,
+    stackTable,
+    frameTable
+  );
+
+  const nativeSymbolsForFunc = getNativeSymbolsForCallNode(
+    funcFramePerStack,
+    frameTable
+  );
+  let initialNativeSymbol = null;
+  const nativeSymbolTimings = getTotalNativeSymbolTimingsForCallNode(
+    samples,
+    funcFramePerStack,
+    frameTable
+  );
+  const hottestNativeSymbol = mapGetKeyWithMaxValue(nativeSymbolTimings);
+  if (hottestNativeSymbol !== undefined) {
+    nativeSymbolsForFunc.add(hottestNativeSymbol);
+    initialNativeSymbol = hottestNativeSymbol;
+  }
+  const nativeSymbolsForFuncArr = [...nativeSymbolsForFunc];
+  nativeSymbolsForFuncArr.sort((a, b) => a - b);
+  if (nativeSymbolsForFuncArr.length !== 0 && initialNativeSymbol === null) {
+    initialNativeSymbol = nativeSymbolsForFuncArr[0];
+  }
+
+  const nativeSymbolInfosForFunc = nativeSymbolsForFuncArr.map(
+    (nativeSymbolIndex) =>
+      getNativeSymbolInfo(
+        nativeSymbolIndex,
+        nativeSymbols,
+        frameTable,
+        stringTable
+      )
+  );
+
+  const lineTimings = getTotalLineTimingsForCallNode(
+    samples,
+    funcFramePerStack,
+    frameTable,
+    funcTable,
+    funcLine,
+    thread.sourceLocationTable
+  );
+  const hottestLine = mapGetKeyWithMaxValue(lineTimings);
+  const addressTimings = getTotalAddressTimingsForCallNode(
+    samples,
+    funcFramePerStack,
+    frameTable,
+    initialNativeSymbol
+  );
+  const hottestInstructionAddress = mapGetKeyWithMaxValue(addressTimings);
+
+  return {
+    sourceIndex,
+    nativeSymbols: nativeSymbolInfosForFunc,
+    initialNativeSymbol:
+      initialNativeSymbol !== null
+        ? nativeSymbolsForFuncArr.indexOf(initialNativeSymbol)
+        : null,
+    scrollToLineNumber: hottestLine,
+    scrollToInstructionAddress: hottestInstructionAddress,
+    highlightedLineNumber: null,
+    highlightedInstructionAddress: null,
   };
 }

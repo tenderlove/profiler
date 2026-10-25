@@ -43,6 +43,7 @@ import type {
   MarkerIndex,
   SelectedMarkersPerThread,
 } from 'firefox-profiler/types';
+import { FuncFlag } from 'firefox-profiler/types';
 import {
   decodeUintArrayFromUrlComponent,
   encodeUintArrayForUrlComponent,
@@ -52,8 +53,9 @@ import { tabSlugs } from '../app-logic/tabs-handling';
 import { StringTable } from 'firefox-profiler/utils/string-table';
 import type { ProfileUpgradeInfo } from 'firefox-profiler/profile-logic/processed-profile-versioning';
 import type { ProfileAndProfileUpgradeInfo } from 'firefox-profiler/actions/receive-profile';
+import type { SingleColumnSortState } from '../components/shared/TreeView';
 
-export const CURRENT_URL_VERSION = 15;
+export const CURRENT_URL_VERSION = 17;
 
 /**
  * This static piece of state might look like an anti-pattern, but it's a relatively
@@ -183,12 +185,15 @@ type BaseQuery = {
 type CallTreeQuery = BaseQuery & {
   search: string; // "js::RunScript"
   invertCallstack: null | undefined;
+  invertFlameGraph: null | undefined;
+  hideIdleSamples: null | undefined;
   ctSummary: string;
 };
 
 type MarkersQuery = BaseQuery & {
   markerSearch: string; // "DOMEvent"
   marker?: MarkerIndex; // Selected marker index for the current thread, e.g. 42
+  markerSort?: string; // "duration-desc~name-asc" — primary first
 };
 
 type NetworkQuery = BaseQuery & {
@@ -198,6 +203,8 @@ type NetworkQuery = BaseQuery & {
 type StackChartQuery = BaseQuery & {
   search: string; // "js::RunScript"
   invertCallstack: null | undefined;
+  invertFlameGraph: null | undefined;
+  hideIdleSamples: null | undefined;
   showUserTimings: null | undefined;
   sameWidths: null | undefined;
   ctSummary: string;
@@ -212,10 +219,13 @@ type Query = BaseQuery & {
   // CallTree/StackChart specific
   search?: string;
   invertCallstack?: null | undefined;
+  invertFlameGraph?: null | undefined;
+  hideIdleSamples?: null | undefined;
   ctSummary?: string;
   transforms?: string;
   sourceViewIndex?: number;
   assemblyView?: string;
+  bottomFullscreen?: boolean;
 
   // StackChart specific
   showUserTimings?: null | undefined;
@@ -224,6 +234,7 @@ type Query = BaseQuery & {
   // Markers specific
   markerSearch?: string;
   marker?: MarkerIndex;
+  markerSort?: string;
 
   // Network specific
   networkSearch?: string;
@@ -309,7 +320,7 @@ export function getQueryStringFromUrlState(urlState: UrlState): string {
         : urlState.profileSpecific.implementation,
     timelineType:
       // The default is the cpu-category view, so only add it to the URL if it's
-      // the stack or category view.
+      // the stack view.
       urlState.profileSpecific.timelineType === 'cpu-category'
         ? undefined
         : urlState.profileSpecific.timelineType,
@@ -329,15 +340,23 @@ export function getQueryStringFromUrlState(urlState: UrlState): string {
       query.sameWidths = urlState.profileSpecific.stackChartSameWidths
         ? null
         : undefined;
-    /* fallsthrough */
+    /* falls through */
     case 'flame-graph':
     case 'calltree': {
       query = baseQuery as CallTreeQueryShape;
 
       query.search = urlState.profileSpecific.callTreeSearchString || undefined;
-      query.invertCallstack = urlState.profileSpecific.invertCallstack
+      query.invertCallstack = urlState.profileSpecific.invertCallTree
         ? null
         : undefined;
+      query.invertFlameGraph = urlState.profileSpecific.invertFlameGraph
+        ? null
+        : undefined;
+      // The URL param is inverted (`hideIdleSamples`) so the default-on state
+      // doesn't clutter the URL; only the non-default "hide" case is encoded.
+      query.hideIdleSamples = urlState.profileSpecific.includeIdleSamples
+        ? undefined
+        : null;
       if (
         selectedThreadsKey !== null &&
         urlState.profileSpecific.transforms[selectedThreadsKey]
@@ -352,8 +371,12 @@ export function getQueryStringFromUrlState(urlState: UrlState): string {
         'timing'
           ? undefined
           : urlState.profileSpecific.lastSelectedCallTreeSummaryStrategy;
-      const { sourceView, assemblyView, isBottomBoxOpenPerPanel } =
-        urlState.profileSpecific;
+      const {
+        sourceView,
+        assemblyView,
+        isBottomBoxOpenPerPanel,
+        isBottomBoxFullscreen,
+      } = urlState.profileSpecific;
 
       if (isBottomBoxOpenPerPanel[selectedTab]) {
         if (sourceView.sourceIndex !== null) {
@@ -364,6 +387,9 @@ export function getQueryStringFromUrlState(urlState: UrlState): string {
           query.assemblyView = stringifyAssemblyViewSymbol(
             nativeSymbols[currentNativeSymbol]
           );
+        }
+        if (isBottomBoxFullscreen) {
+          query.bottomFullscreen = true;
         }
       }
       break;
@@ -378,6 +404,11 @@ export function getQueryStringFromUrlState(urlState: UrlState): string {
         urlState.profileSpecific.selectedMarkers[selectedThreadsKey] !== null
           ? urlState.profileSpecific.selectedMarkers[selectedThreadsKey]
           : undefined;
+      if (selectedTab === 'marker-table') {
+        query.markerSort = convertMarkerTableSortToString(
+          urlState.profileSpecific.markerTableSort
+        );
+      }
       break;
     case 'network-chart':
       query = baseQuery as NetworkQueryShape;
@@ -535,7 +566,6 @@ export function stateFromLocation(
     toValidTabSlug(pathParts[selectedTabPathPart]) || 'calltree';
   const sourceView: SourceViewState = {
     scrollGeneration: 0,
-    libIndex: null,
     sourceIndex: null,
     highlightedLine: null,
   };
@@ -581,7 +611,9 @@ export function stateFromLocation(
       lastSelectedCallTreeSummaryStrategy: toValidCallTreeSummaryStrategy(
         query.ctSummary || undefined
       ),
-      invertCallstack: query.invertCallstack === undefined ? false : true,
+      invertCallTree: query.invertCallstack === undefined ? false : true,
+      invertFlameGraph: query.invertFlameGraph === undefined ? false : true,
+      includeIdleSamples: query.hideIdleSamples === undefined,
       showUserTimings: query.showUserTimings === undefined ? false : true,
       stackChartSameWidths: query.sameWidths === undefined ? false : true,
       committedRanges: query.range ? parseCommittedRanges(query.range) : [],
@@ -593,6 +625,7 @@ export function stateFromLocation(
       sourceView,
       assemblyView,
       isBottomBoxOpenPerPanel,
+      isBottomBoxFullscreen: query.bottomFullscreen || false,
       timelineType: validateTimelineType(query.timelineType),
       showJsTracerSummary: query.summary === undefined ? false : true,
       globalTrackOrder: convertGlobalTrackOrderFromString(
@@ -614,8 +647,51 @@ export function stateFromLocation(
         ? query.hiddenThreads.split('-').map((index) => Number(index))
         : null,
       selectedMarkers,
+      markerTableSort: convertMarkerTableSortFromString(query.markerSort),
     },
   };
+}
+
+// MarkerTable sort URL encoding. Format: `col-asc~col-desc~…`, primary first.
+// Column names must not contain '-' (used here as the direction separator).
+// `null` means "at the table's default" and is encoded as an absent query
+// parameter.
+const VALID_MARKER_SORT_COLUMNS = new Set(['start', 'duration', 'name']);
+
+function convertMarkerTableSortToString(
+  sort: SingleColumnSortState[] | null
+): string | undefined {
+  if (sort === null) {
+    return undefined;
+  }
+  return sort
+    .map((s) => `${s.column}-${s.ascending ? 'asc' : 'desc'}`)
+    .join('~');
+}
+
+function convertMarkerTableSortFromString(
+  raw: string | null | void
+): SingleColumnSortState[] | null {
+  if (!raw) {
+    return null;
+  }
+  const parsed: SingleColumnSortState[] = [];
+  for (const part of raw.split('~')) {
+    const dashIndex = part.lastIndexOf('-');
+    if (dashIndex === -1) {
+      return null;
+    }
+    const column = part.slice(0, dashIndex);
+    const dir = part.slice(dashIndex + 1);
+    if (
+      !VALID_MARKER_SORT_COLUMNS.has(column) ||
+      (dir !== 'asc' && dir !== 'desc')
+    ) {
+      return null;
+    }
+    parsed.push({ column, ascending: dir === 'asc' });
+  }
+  return parsed;
 }
 
 function convertGlobalTrackOrderFromString(
@@ -1351,7 +1427,264 @@ const _upgraders: {
       .map(mapIndexesInTransform)
       .join('~');
   },
+  [16]: (
+    processedLocation: ProcessedLocationBeforeUpgrade,
+    profile?: Profile
+  ) => {
+    // The 'memory', 'power', 'bandwidth', and 'process-cpu' LocalTrack types
+    // have been collapsed into a single 'counter' type. This moves counter
+    // tracks into a single group inside each PID's local track array, which
+    // shifts the track indexes that older URLs recorded. Remap
+    // localTrackOrderByPid and hiddenLocalTracksByPid so existing URLs keep
+    // pointing at the same tracks.
+    const { query } = processedLocation;
+    if (!profile || !profile.counters || profile.counters.length === 0) {
+      return;
+    }
+    if (!query.localTrackOrderByPid && !query.hiddenLocalTracksByPid) {
+      return;
+    }
+
+    const oldToNewIndexByPid = _computeV16LocalTrackIndexRemap(profile);
+
+    if (query.localTrackOrderByPid) {
+      query.localTrackOrderByPid = (query.localTrackOrderByPid as string)
+        .split('~')
+        .map((pidAndTracks) => {
+          const dash = pidAndTracks.indexOf('-');
+          if (dash === -1) {
+            return pidAndTracks;
+          }
+          const pid = pidAndTracks.slice(0, dash);
+          const encoded = pidAndTracks.slice(dash + 1);
+          const remap = oldToNewIndexByPid.get(pid);
+          if (!remap) {
+            return pidAndTracks;
+          }
+          const oldOrder = decodeUintArrayFromUrlComponent(encoded);
+          const newOrder = [];
+          for (const oldIndex of oldOrder) {
+            const newIndex = remap[oldIndex];
+            if (newIndex !== undefined && newIndex !== null) {
+              newOrder.push(newIndex);
+            }
+          }
+          return `${pid}-${encodeUintArrayForUrlComponent(newOrder)}`;
+        })
+        .join('~');
+    }
+
+    if (query.hiddenLocalTracksByPid) {
+      query.hiddenLocalTracksByPid = (query.hiddenLocalTracksByPid as string)
+        .split('~')
+        .map((pidAndTracks) => {
+          const dash = pidAndTracks.indexOf('-');
+          if (dash === -1) {
+            return pidAndTracks;
+          }
+          const pid = pidAndTracks.slice(0, dash);
+          const encoded = pidAndTracks.slice(dash + 1);
+          const remap = oldToNewIndexByPid.get(pid);
+          if (!remap) {
+            return pidAndTracks;
+          }
+          const oldHidden = decodeUintArrayFromUrlComponent(encoded);
+          const newHidden = new Set<number>();
+          for (const oldIndex of oldHidden) {
+            const newIndex = remap[oldIndex];
+            if (newIndex !== undefined && newIndex !== null) {
+              newHidden.add(newIndex);
+            }
+          }
+          return `${pid}-${encodeUintSetForUrlComponent(newHidden)}`;
+        })
+        .join('~');
+    }
+  },
+  [17]: (_processedLocation: ProcessedLocationBeforeUpgrade) => {
+    // Adds the optional `markerSort` query parameter for the marker table.
+    // No migration is necessary: older URLs simply omit it and the default
+    // (sort by start ascending) is used.
+  },
 };
+
+/**
+ * Produce a per-PID mapping from old local-track indexes (using the pre-v16
+ * LOCAL_TRACK_INDEX_ORDER) to new local-track indexes (post-v16). Used by the
+ * v16 URL upgrader.
+ *
+ * The two layouts share the same set of tracks; only the relative positions of
+ * counter tracks differ. The helper reconstructs both layouts by simulating
+ * what computeLocalTracksByPid would have produced under each.
+ */
+function _computeV16LocalTrackIndexRemap(
+  profile: Profile
+): Map<Pid, Array<number | null>> {
+  // Pre-v16 LOCAL_TRACK_INDEX_ORDER.
+  // Note: we don't preserve 'event-delay' and 'process-cpu' in URLs,
+  // as they are experimental.
+  const OLD_SLOT = {
+    thread: 0,
+    network: 1,
+    memory: 2,
+    ipc: 3,
+    marker: 7,
+    power: 6,
+    bandwidth: 8,
+  };
+  // Post-v16 LOCAL_TRACK_INDEX_ORDER.
+  const NEW_SLOT = {
+    thread: 0,
+    network: 1,
+    counter: 2,
+    ipc: 3,
+    marker: 5,
+  };
+
+  type Entry = {
+    id: string;
+    oldSlot: number | null;
+    newSlot: number | null;
+  };
+
+  const entriesByPid = new Map<Pid, Entry[]>();
+  const ensurePid = (pid: Pid): Entry[] => {
+    let entries = entriesByPid.get(pid);
+    if (entries === undefined) {
+      entries = [];
+      entriesByPid.set(pid, entries);
+    }
+    return entries;
+  };
+
+  const markerSchemasWithGraphs = (profile.meta.markerSchema || []).filter(
+    (schema) => Array.isArray(schema.graphs) && schema.graphs.length > 0
+  );
+
+  for (
+    let threadIndex = 0;
+    threadIndex < profile.threads.length;
+    threadIndex++
+  ) {
+    const thread = profile.threads[threadIndex];
+    const { pid, markers } = thread;
+
+    if (!thread.isMainThread) {
+      ensurePid(pid).push({
+        id: `t:${threadIndex}`,
+        oldSlot: OLD_SLOT.thread,
+        newSlot: NEW_SLOT.thread,
+      });
+    }
+    if (markers.data.some((datum) => datum && datum.type === 'Network')) {
+      ensurePid(pid).push({
+        id: `n:${threadIndex}`,
+        oldSlot: OLD_SLOT.network,
+        newSlot: NEW_SLOT.network,
+      });
+    }
+    if (markers.data.some((datum) => datum && datum.type === 'IPC')) {
+      ensurePid(pid).push({
+        id: `i:${threadIndex}`,
+        oldSlot: OLD_SLOT.ipc,
+        newSlot: NEW_SLOT.ipc,
+      });
+    }
+
+    if (markerSchemasWithGraphs.length > 0) {
+      const markerTracksBySchemaName: Map<
+        string,
+        { keys: string[]; markerNames: Set<number> }
+      > = new Map();
+      for (const markerSchema of markerSchemasWithGraphs) {
+        markerTracksBySchemaName.set(markerSchema.name, {
+          keys: (markerSchema.graphs || []).map((graph) => graph.key),
+          markerNames: new Set(),
+        });
+      }
+      for (let i = 0; i < markers.length; ++i) {
+        const markerNameIndex = markers.name[i];
+        const markerData = markers.data[i];
+        if (markerData && markerData.type) {
+          const mapEntry = markerTracksBySchemaName.get(markerData.type);
+          if (mapEntry && mapEntry.keys.every((k) => k in markerData)) {
+            mapEntry.markerNames.add(markerNameIndex);
+          }
+        }
+      }
+      for (const [schemaName, { markerNames }] of markerTracksBySchemaName) {
+        for (const markerName of markerNames) {
+          ensurePid(pid).push({
+            id: `m:${threadIndex}:${schemaName}:${markerName}`,
+            oldSlot: OLD_SLOT.marker,
+            newSlot: NEW_SLOT.marker,
+          });
+        }
+      }
+    }
+  }
+
+  const { counters } = profile;
+  if (counters) {
+    for (let counterIndex = 0; counterIndex < counters.length; counterIndex++) {
+      const counter = counters[counterIndex];
+      const { pid, category, name, samples } = counter;
+
+      // OLD behavior: only Memory / Bandwidth / Power produced tracks.
+      let oldSlot: number | null;
+      if (category === 'Memory') {
+        oldSlot = OLD_SLOT.memory;
+      } else if (category === 'Bandwidth') {
+        oldSlot = OLD_SLOT.bandwidth;
+      }
+      // We assumed there was no data when <= 2 samples.
+      else if (category === 'power' && samples.length > 2) {
+        oldSlot = OLD_SLOT.power;
+      } else {
+        oldSlot = null;
+      }
+
+      // NEW behavior: mirror computeLocalTracksByPid. processCPU counters are
+      // added later by addProcessCPUTracksForProcess when the experimental
+      // toggle fires, every other counter becomes a track.
+      const newSlot: number | null =
+        category === 'CPU' && name === 'processCPU' ? null : NEW_SLOT.counter;
+
+      if (oldSlot === null && newSlot === null) {
+        continue;
+      }
+
+      ensurePid(pid).push({
+        id: `c:${counterIndex}`,
+        oldSlot,
+        newSlot,
+      });
+    }
+  }
+
+  const remapByPid = new Map<Pid, Array<number | null>>();
+  for (const [pid, entries] of entriesByPid) {
+    const oldList = entries
+      .filter((e) => e.oldSlot !== null)
+      .slice()
+      .sort((a, b) => (a.oldSlot as number) - (b.oldSlot as number));
+    const newList = entries
+      .filter((e) => e.newSlot !== null)
+      .slice()
+      .sort((a, b) => (a.newSlot as number) - (b.newSlot as number));
+
+    const newIdToIndex = new Map<string, number>();
+    newList.forEach((entry, i) => newIdToIndex.set(entry.id, i));
+
+    const remap: Array<number | null> = oldList.map((entry) => {
+      const newIndex = newIdToIndex.get(entry.id);
+      return newIndex === undefined ? null : newIndex;
+    });
+    remapByPid.set(pid, remap);
+  }
+
+  return remapByPid;
+}
 
 for (let destVersion = 1; destVersion <= CURRENT_URL_VERSION; destVersion++) {
   if (!_upgraders[destVersion]) {
@@ -1383,15 +1716,15 @@ function getStackIndexFromVersion3JSCallNodePath(
   stackIndexDepth.set(null, -1);
 
   for (let stackIndex = 0; stackIndex < stackTable.length; stackIndex++) {
-    const prefix = stackTable.prefix[stackIndex];
+    const offset = stackTable.prefixOffset[stackIndex];
+    const prefix = offset === 0 ? null : stackIndex - offset;
     const frameIndex = stackTable.frame[stackIndex];
     const funcIndex = frameTable.func[frameIndex];
-    const isJS = funcTable.isJS[funcIndex];
+    const isJS = (funcTable.flags[funcIndex] & FuncFlag.IsJS) !== 0;
     // We know that at this point stack table is sorted and the following
     // condition holds:
-    // assert(prefixStack === null || prefixStack < stackIndex);
-    const doesPrefixMatchCallNodePath =
-      prefix === null || stackIndexDepth.has(prefix);
+    // assert(prefix === null || prefix < stackIndex);
+    const doesPrefixMatchCallNodePath = stackIndexDepth.has(prefix);
 
     if (!doesPrefixMatchCallNodePath) {
       continue;
@@ -1430,10 +1763,15 @@ function getVersion4JSCallNodePathFromStackIndex(
   while (nextStackIndex !== null) {
     const frameIndex: IndexIntoFrameTable = stackTable.frame[nextStackIndex];
     const funcIndex = frameTable.func[frameIndex];
-    if (funcTable.isJS[funcIndex] || funcTable.relevantForJS[funcIndex]) {
+    if (
+      (funcTable.flags[funcIndex] &
+        (FuncFlag.IsJS | FuncFlag.RelevantForJS)) !==
+      0
+    ) {
       callNodePath.unshift(funcIndex);
     }
-    nextStackIndex = stackTable.prefix[nextStackIndex];
+    const offset: number = stackTable.prefixOffset[nextStackIndex];
+    nextStackIndex = offset === 0 ? null : nextStackIndex - offset;
   }
   return callNodePath;
 }
@@ -1445,14 +1783,10 @@ function getVersion4JSCallNodePathFromStackIndex(
 function validateTimelineType(
   timelineType: string | null | undefined
 ): TimelineType {
-  const VALID_TIMELINE_TYPES: Record<TimelineType, true> = {
-    stack: true,
-    category: true,
-    'cpu-category': true,
-  };
-  if (timelineType && timelineType in VALID_TIMELINE_TYPES) {
-    return timelineType as TimelineType;
+  if (timelineType === 'stack') {
+    return 'stack';
   }
+  // 'category' is an old value that is treated as 'cpu-category'.
   return 'cpu-category';
 }
 

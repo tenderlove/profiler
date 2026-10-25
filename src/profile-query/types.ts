@@ -1,0 +1,1274 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/**
+ * Shared types for profile querying.
+ * These types are used by both profile-query (the library) and profiler-cli.
+ */
+
+import type { ProfileFileFormat } from 'firefox-profiler/profile-logic/profile-file-encoding';
+import type { TabSlug } from 'firefox-profiler/app-logic/tabs-handling';
+import type {
+  Transform,
+  CallTreeSummaryStrategy,
+  CounterGraphType,
+  CounterTooltipDataSource,
+  NetworkStatus,
+  SampleUnits,
+  WeightType,
+} from 'firefox-profiler/types';
+
+export type { CallTreeSummaryStrategy, WeightType };
+
+// ===== Utility types =====
+
+export type TopMarker = {
+  handle: string;
+  label: string;
+  start: number; // Milliseconds since the profile start (`rootRange.start`)
+  duration?: number;
+  hasStack?: boolean;
+};
+
+export type FunctionDisplayInfo = {
+  name: string;
+  nameWithLibrary: string;
+  library?: string;
+};
+
+// ===== Filter Options =====
+
+export type MarkerFilterOptions = {
+  searchString?: string;
+  minDuration?: number; // Minimum duration in milliseconds
+  maxDuration?: number; // Maximum duration in milliseconds
+  category?: string; // Filter by category name
+  hasStack?: boolean; // Only show markers with stack traces
+  limit?: number; // Limit the number of markers in aggregation (not output lines)
+  groupBy?: string; // Grouping strategy (e.g., "type,name" or "type,field:eventType")
+  autoGroup?: boolean; // Automatically determine grouping based on field variance
+  topN?: number; // Number of top markers to include per group in JSON output (default: 5)
+  list?: boolean; // Return a flat chronological list of all individual markers
+};
+
+/** A marker payload field, as shown by `marker info`. */
+export type MarkerFieldValue = {
+  key: string;
+  label: string;
+  value: any; // Payload value, with string-table indexes resolved to strings
+  formattedValue: string; // Rendered per the schema's `format`
+};
+
+export type FlatMarkerItem = {
+  handle: string;
+  name: string;
+  label: string; // Schema-derived table label (may equal name if no schema)
+  start: number; // Milliseconds since the profile start (`rootRange.start`)
+  duration?: number; // Milliseconds if interval marker
+  hasStack: boolean;
+  category: string;
+  markerType?: string; // The payload's `type`, i.e. the marker schema name
+  fields?: MarkerFieldValue[]; // As `marker info --json` reports them
+  data?: { [key: string]: any }; // Raw payload, minus `type` and `cause`
+};
+
+export type FunctionFilterOptions = {
+  searchString?: string; // Substring search in function names
+  minSelf?: number; // Minimum self time percentage (0-100)
+  limit?: number; // Limit the number of functions in output
+};
+
+// ===== Sample Filter Stack =====
+
+/**
+ * The specification for a single entry on the profiler-cli filter stack.
+ * Each entry corresponds to one `profiler-cli filter push` invocation.
+ */
+export type SampleFilterSpec =
+  // Phase 1: Redux transform-backed filters
+  | { type: 'excludes-function'; funcIndexes: number[] }
+  | { type: 'merge'; funcIndexes: number[] }
+  | { type: 'root-at'; funcIndex: number }
+  | { type: 'during-marker'; searchString: string }
+  // Phase 2: Extended filter-samples transforms
+  | { type: 'includes-function'; funcIndexes: number[] }
+  | { type: 'includes-prefix'; funcIndexes: number[] }
+  | { type: 'includes-suffix'; funcIndex: number }
+  | { type: 'outside-marker'; searchString: string };
+
+/**
+ * One entry in the filter stack shown/managed by the CLI.
+ *
+ * One entry corresponds to one `filter push`. A push may dispatch multiple
+ * Redux transforms (e.g. `--merge f-1,f-2` dispatches two merge-function
+ * transforms); they are grouped into a single entry here so the CLI view
+ * matches what the user typed. Transforms already present when the session
+ * started (e.g. loaded from a profiler.firefox.com URL) each form their own
+ * single-transform entry so they remain individually poppable.
+ */
+export type FilterEntry = {
+  /** 1-based position in the filter list. */
+  index: number;
+  /** The raw Redux transforms backing this entry (1 or more). */
+  transforms: Transform[];
+  /** Human-readable description. */
+  description: string;
+};
+
+export type FilterStackResult = {
+  type: 'filter-stack';
+  threadHandle: string;
+  filters: FilterEntry[];
+  callTreeSearch?: string;
+  action?: 'push' | 'pop' | 'clear';
+  message?: string;
+};
+
+// ===== Session Context =====
+// Context information included in all command results for persistent display
+
+/** A thread as named in the context header: its own name and its process'. */
+export type ContextThreadInfo = {
+  threadIndex: number;
+  name: string;
+  /** Name of the process owning the thread, e.g. "WebExtensions". */
+  processName: string;
+};
+
+export type SessionContext = {
+  /**
+   * The sticky session selection, as set by `thread select`. Combined handle
+   * like "t-0" or "t-0,t-1,t-2". Unaffected by a command's `--thread`.
+   */
+  selectedThreadHandle: string | null;
+  selectedThreads: ContextThreadInfo[];
+  /**
+   * The thread this particular result is about, when it is not the selected
+   * one: a `--thread`-scoped command, or a marker looked up in another thread.
+   * Null when the result is about the selection.
+   */
+  resultThreadHandle: string | null;
+  resultThreads: ContextThreadInfo[];
+  currentViewRange: {
+    start: number;
+    startName: string;
+    end: number;
+    endName: string;
+  } | null; // null if viewing full profile
+  // Deliberately NOT rebased: this is the origin the other times subtract.
+  rootRange: {
+    start: number;
+    end: number;
+  };
+  callTreeSummaryStrategy: CallTreeSummaryStrategy;
+  callTreeSearch?: string;
+};
+
+/**
+ * Wrapper type that adds session context to any result type.
+ */
+export type WithContext<T> = T & { context: SessionContext };
+
+// ===== Permalink Command =====
+
+export type PermalinkResult = {
+  type: 'permalink';
+  /** Full profiler.firefox.com URL encoding the current session view. */
+  url: string;
+  /** share.firefox.dev URL, only when shortening was requested. */
+  shortUrl: string | null;
+};
+
+/**
+ * Ephemeral view settings layered on top of the session state when building a
+ * permalink, so a link can reproduce what a single query showed. Every field is
+ * optional and falls back to the session state.
+ */
+export type PermalinkView = {
+  threadHandle?: string;
+  /** Selects this marker in the URL and picks its thread. */
+  markerHandle?: string;
+  tab?: TabSlug;
+  callTreeSearch?: string;
+  markerSearch?: string;
+  networkSearch?: string;
+  includeIdle?: boolean;
+  invertCallstack?: boolean;
+  strategy?: CallTreeSummaryStrategy;
+  sampleFilters?: SampleFilterSpec[];
+};
+
+// ===== Status Command =====
+
+export type StatusResult = {
+  type: 'status';
+  selectedThreadHandle: string | null; // Combined handle like "t-0" or "t-0,t-1,t-2"
+  selectedThreads: ContextThreadInfo[];
+  viewRanges: Array<{
+    start: number;
+    startName: string;
+    end: number;
+    endName: string;
+  }>;
+  rootRange: {
+    start: number;
+    end: number;
+  };
+  /** Filter stacks for all threads that have active filters */
+  filterStacks: Array<{
+    threadsKey: string | number;
+    threadHandle: string;
+    filters: FilterEntry[];
+  }>;
+  callTreeSummaryStrategy: CallTreeSummaryStrategy;
+  callTreeSearch?: string;
+};
+
+// ===== Category Breakdown =====
+
+export type CategorySubBreakdownEntry = {
+  name: string;
+  subcategoryIndex: number;
+  samples: number;
+  percentage: number; // Of the breakdown's totalSamples, like the parent category row
+};
+
+export type CategoryBreakdownEntry = {
+  name: string;
+  categoryIndex: number;
+  samples: number;
+  percentage: number;
+  subcategories: CategorySubBreakdownEntry[]; // Empty unless the category has more than one
+};
+
+/** Categories sorted descending, with the empty ones removed. */
+export type CategoryBreakdown = {
+  totalSamples: number; // Sum of the absolute category values, i.e. the percentage denominator
+  categories: CategoryBreakdownEntry[];
+};
+
+export type FunctionCategoryBreakdown = CategoryBreakdown & {
+  samples: number; // Signed, and unlike totalSamples only counts this function
+  percentageOfThread: number;
+};
+
+export type FunctionCategoryBreakdowns = {
+  threadHandle: string;
+  friendlyThreadName: string;
+  threadSamples: number;
+  running: FunctionCategoryBreakdown;
+  self: FunctionCategoryBreakdown;
+};
+
+// ===== Function Commands =====
+
+export type FunctionExpandResult = {
+  type: 'function-expand';
+  functionHandle: string;
+  funcIndex: number;
+  name: string;
+  fullName: string;
+  library?: string;
+};
+
+export type FunctionInfoResult = {
+  type: 'function-info';
+  functionHandle: string;
+  funcIndex: number;
+  name: string;
+  fullName: string;
+  isJS: boolean;
+  relevantForJS: boolean;
+  resource?: {
+    name: string;
+    index: number;
+  };
+  // The library of this function, if any.
+  // Note that, these days, funcs can be associated with multiple
+  // libraries, so this isn't the best representation anymore. In those
+  // cases this will be set to one of them, but it's arbitrary which one.
+  // See https://github.com/firefox-devtools/profiler/issues/6270
+  library?: {
+    name: string;
+    path: string;
+    debugName?: string;
+    debugPath?: string;
+    breakpadId?: string;
+  };
+  categoryBreakdown: FunctionCategoryBreakdowns;
+};
+
+// ===== Function Annotate =====
+
+export type AnnotateMode = 'src' | 'asm' | 'all';
+
+export type AnnotatedSourceLine = {
+  lineNumber: number;
+  selfSamples: number;
+  totalSamples: number;
+  sourceText: string | null;
+};
+
+export type FunctionSourceAnnotation = {
+  filename: string;
+  totalFileLines: number | null;
+  samplesWithFunction: number;
+  samplesWithLineInfo: number;
+  // Human-readable description of how lines were selected, e.g. "±2 lines context", "full function", "full file"
+  contextMode: string;
+  lines: AnnotatedSourceLine[];
+};
+
+export type AnnotatedInstruction = {
+  address: number;
+  selfSamples: number;
+  totalSamples: number;
+  decodedString: string;
+};
+
+export type FunctionAsmAnnotation = {
+  compilationIndex: number;
+  symbolName: string;
+  symbolAddress: number;
+  functionSize: number | null;
+  nativeSymbolCount: number;
+  fetchError: string | null;
+  instructions: AnnotatedInstruction[];
+};
+
+export type SourceAnnotationResult = {
+  annotation: FunctionSourceAnnotation | null;
+  warnings: string[];
+};
+
+export type AsmAnnotationsResult = {
+  annotations: FunctionAsmAnnotation[];
+  warnings: string[];
+};
+
+export type FunctionAnnotateResult = {
+  type: 'function-annotate';
+  functionHandle: string;
+  funcIndex: number;
+  name: string;
+  fullName: string;
+  threadHandle: string;
+  friendlyThreadName: string;
+  totalSelfSamples: number;
+  totalTotalSamples: number;
+  callTreeSummaryStrategy: CallTreeSummaryStrategy;
+  weightType: WeightType;
+  mode: AnnotateMode;
+  srcAnnotation: FunctionSourceAnnotation | null;
+  asmAnnotations: FunctionAsmAnnotation[];
+  warnings: string[];
+};
+
+// ===== View Range Commands =====
+
+export type ViewRangeResult = {
+  type: 'view-range';
+  action: 'push' | 'pop';
+  range: {
+    start: number;
+    startName: string;
+    end: number;
+    endName: string;
+  };
+  message: string;
+  // Enhanced information for better UX (optional, only present for 'push' action)
+  duration?: number; // Duration in milliseconds
+  zoomDepth?: number; // Current zoom stack depth
+  markerInfo?: {
+    // Present if zoomed to a marker
+    markerHandle: string;
+    markerName: string;
+    threadHandle: string;
+    threadName: string;
+  };
+  warning?: string; // Present if the range extends outside the profile duration
+};
+
+// ===== Thread Commands =====
+
+export type ThreadSelectResult = {
+  type: 'thread-select';
+  threadHandle: string;
+  threadNames: string[];
+};
+
+export type StrategySelectResult = {
+  type: 'strategy-select';
+  threadHandle: string;
+  strategy: CallTreeSummaryStrategy;
+  availableStrategies: CallTreeSummaryStrategy[];
+};
+
+/** How `thread list` orders its rows. */
+export type ThreadListSort = 'cpu' | 'index' | 'markers' | 'name';
+
+export type ThreadListOptions = {
+  /** Ordering of the rows. Defaults to 'cpu' (busiest thread first). */
+  sort?: ThreadListSort;
+  /** Keep only threads whose name, process name, pid or tid matches. */
+  searchString?: string;
+  /** Show at most this many rows. Omitted or 0 means "no limit". */
+  limit?: number;
+};
+
+/**
+ * One row of the flat `thread list` table. `cpuMs` and `markerCount` cover the
+ * whole profile (not the current zoom range), matching `profile info`.
+ */
+export type ThreadListItem = {
+  threadHandle: string; // e.g. "t-0"
+  threadIndex: number;
+  name: string; // raw thread name, e.g. "GeckoMain"
+  processName: string; // e.g. "Parent Process"
+  etld1?: string; // eTLD+1 of an isolated content process, when known
+  pid: string;
+  processIndex: number;
+  tid: number | string;
+  cpuMs: number;
+  markerCount: number;
+  /** True for the thread(s) currently selected in the session. */
+  selected: boolean;
+};
+
+export type ThreadListResult = {
+  type: 'thread-list';
+  threads: ThreadListItem[];
+  /** Number of threads in the profile, before search/limit filtering. */
+  totalThreadCount: number;
+  /** Number of processes in the profile. */
+  processCount: number;
+  /** Number of threads dropped by `limit` after search filtering. */
+  hiddenByLimit: number;
+  sort: ThreadListSort;
+  searchQuery?: string;
+};
+
+export type ThreadInfoResult = {
+  type: 'thread-info';
+  threadHandle: string;
+  name: string;
+  friendlyName: string;
+  tid: number | string;
+  createdAt: number;
+  createdAtName: string;
+  endedAt: number | null;
+  endedAtName: string | null;
+  sampleCount: number;
+  markerCount: number;
+  cpuActivity: Array<{
+    startTime: number;
+    startTimeName: string;
+    startTimeStr: string;
+    endTime: number;
+    endTimeName: string;
+    endTimeStr: string;
+    cpuMs: number;
+    depthLevel: number;
+  }> | null;
+  networkActivity: ThreadNetworkSummary | null;
+  availableStrategies: CallTreeSummaryStrategy[];
+};
+
+export type TopFunctionInfo = FunctionDisplayInfo & {
+  functionHandle: string;
+  functionIndex: number;
+  totalSamples: number;
+  totalPercentage: number;
+  selfSamples: number;
+  selfPercentage: number;
+};
+
+export type ThreadSamplesResult = {
+  type: 'thread-samples';
+  threadHandle: string;
+  friendlyThreadName: string;
+  activeOnly?: boolean;
+  search?: string;
+  activeFilters?: FilterEntry[];
+  ephemeralFilters?: SampleFilterSpec[];
+  categoryBreakdown: CategoryBreakdown;
+  callTreeSummaryStrategy: CallTreeSummaryStrategy;
+  weightType: WeightType;
+  topFunctionsByTotal: TopFunctionInfo[];
+  topFunctionsBySelf: TopFunctionInfo[];
+  heaviestStack: {
+    selfSamples: number;
+    frameCount: number;
+    hasInlinedFrames: boolean;
+    frames: Array<
+      FunctionDisplayInfo & {
+        totalSamples: number;
+        totalPercentage: number;
+        selfSamples: number;
+        selfPercentage: number;
+        inlineStatus?: InlineStatus;
+      }
+    >;
+  };
+};
+
+/**
+ * Inline status of a frame / call node.
+ * - 'inlined': all calls to this function at this call site were inlined by the
+ *   compiler into the nearest non-inlined ancestor's native function.
+ * - 'divergent': some calls were inlined, some were not.
+ */
+export type InlineStatus = 'inlined' | 'divergent';
+
+export type ThreadSamplesTopDownResult = {
+  type: 'thread-samples-top-down';
+  threadHandle: string;
+  friendlyThreadName: string;
+  activeOnly?: boolean;
+  search?: string;
+  activeFilters?: FilterEntry[];
+  ephemeralFilters?: SampleFilterSpec[];
+  callTreeSummaryStrategy: CallTreeSummaryStrategy;
+  weightType: WeightType;
+  regularCallTree: CallTreeNode;
+};
+
+export type ThreadSamplesBottomUpResult = {
+  type: 'thread-samples-bottom-up';
+  threadHandle: string;
+  friendlyThreadName: string;
+  activeOnly?: boolean;
+  search?: string;
+  activeFilters?: FilterEntry[];
+  ephemeralFilters?: SampleFilterSpec[];
+  callTreeSummaryStrategy: CallTreeSummaryStrategy;
+  weightType: WeightType;
+  invertedCallTree: CallTreeNode | null;
+};
+
+/**
+ * Scoring strategy for selecting which call tree nodes to include.
+ * The score determines node priority, with the constraint that child score ≤ parent score.
+ */
+export type CallTreeScoringStrategy =
+  | 'exponential-0.95' // totalPercentage * (0.95 ^ depth) - slow decay
+  | 'exponential-0.9' // totalPercentage * (0.9 ^ depth) - medium decay
+  | 'exponential-0.8' // totalPercentage * (0.8 ^ depth) - fast decay
+  | 'harmonic-0.1' // totalPercentage / (1 + 0.1 * depth) - very slow
+  | 'harmonic-0.5' // totalPercentage / (1 + 0.5 * depth) - medium
+  | 'harmonic-1.0' // totalPercentage / (1 + depth) - standard harmonic
+  | 'percentage-only'; // totalPercentage - no depth penalty
+
+export type CallTreeNode = FunctionDisplayInfo & {
+  callNodeIndex?: number; // Optional for root node
+  functionHandle?: string; // Optional for root node
+  functionIndex?: number; // Optional for root node
+  totalSamples: number;
+  totalPercentage: number;
+  selfSamples: number;
+  selfPercentage: number;
+  /** Original depth in tree before collapsing single-child chains */
+  originalDepth: number;
+  /** Whether this call node represents an inlined frame. Unset on the virtual root. */
+  inlineStatus?: InlineStatus;
+  /**
+   * Only set on the synthetic root. True if any node in the tree has an
+   * inlineStatus. Lets consumers skip a full tree walk to detect inlining.
+   */
+  hasInlinedFrames?: boolean;
+  children: CallTreeNode[];
+  /** Information about truncated children, if any were omitted */
+  childrenTruncated?: {
+    count: number;
+    combinedSamples: number;
+    combinedPercentage: number;
+    maxSamples: number;
+    maxPercentage: number;
+    depth: number; // Depth where children were truncated
+  };
+};
+
+export type NetworkPhaseTimings = {
+  dns?: number;
+  tcp?: number;
+  tls?: number;
+  ttfb?: number;
+  download?: number;
+  mainThread?: number;
+};
+
+export type NetworkRequestSort = 'start' | 'duration';
+
+export type NetworkRequestEntry = {
+  markerHandle: string;
+  url: string;
+  httpStatus?: number;
+  httpVersion?: string;
+  cacheStatus?: string;
+  transferSizeKB?: number;
+  startTime: number;
+  duration: number;
+  // The derived marker's status. STATUS_REDIRECT / STATUS_CANCEL legs are
+  // listed alongside completed requests but flagged so they aren't mistaken
+  // for them.
+  status: NetworkStatus;
+  // True when the request was still in flight when the recording stopped
+  // (only a START event, no stop); its duration is measured until the end of
+  // the recording.
+  incomplete: boolean;
+  // True when the request completed during the recording but its START event
+  // predates it, so the reported duration is a lower bound.
+  startedBeforeRecording: boolean;
+  phases: NetworkPhaseTimings;
+};
+
+export type ThreadNetworkResult = {
+  type: 'thread-network';
+  threadHandle: string;
+  friendlyThreadName: string;
+  // Completed (STATUS_STOP) only; use `totalCandidateCount` as a total.
+  totalRequestCount: number;
+  // Requests still in flight when the recording stopped.
+  incompleteCount: number;
+  // Every record the filters ran against; `filteredRequestCount` is a subset.
+  totalCandidateCount: number;
+  filteredRequestCount: number;
+  // How the request list is ordered.
+  sort: NetworkRequestSort;
+  filters?: {
+    searchString?: string;
+    minDuration?: number;
+    maxDuration?: number;
+    limit?: number;
+  };
+  summary: {
+    cacheHit: number;
+    cacheMiss: number;
+    cacheUnknown: number;
+    // Interval union of all requests intersecting the range: wall-clock
+    // time, unlike the summed phase totals.
+    inFlightMs: number;
+    inFlightPercentage: number;
+    peakConcurrency: number;
+    rangeDurationMs: number;
+    phaseTotals: NetworkPhaseTimings;
+  };
+  requests: NetworkRequestEntry[];
+};
+
+/**
+ * A single network request surfaced in a network summary (profile- or
+ * thread-level). Carries handles so the next drill-down command
+ * (`zoom push m-N`, `marker info m-N`) is obvious.
+ */
+export type NetworkSummaryRequest = {
+  markerHandle: string;
+  threadHandle: string;
+  url: string;
+  durationMs: number;
+  startTime: number;
+  transferSizeKB?: number;
+  httpStatus?: number;
+  // The derived marker's status. STATUS_REDIRECT / STATUS_CANCEL legs are
+  // surfaced (they carry in-flight time and the pre-redirect URL) but are not
+  // completed requests, so the formatter labels them.
+  status: NetworkStatus;
+  // True when the request was still in flight when the recording stopped.
+  incomplete: boolean;
+  // True when the request completed but its START event predates the
+  // recording, so the reported duration is a lower bound.
+  startedBeforeRecording: boolean;
+};
+
+/**
+ * Network activity summary for a single thread, scoped to the current range.
+ * The headline metric is `inFlightPercentage` (interval-union "in flight"
+ * time), which unlike summed phase durations can't exceed the wall clock.
+ */
+export type ThreadNetworkSummary = {
+  threadHandle: string;
+  threadName: string;
+  // Completed (STATUS_STOP) requests intersecting the range.
+  requestCount: number;
+  // Requests still in flight when the recording stopped.
+  incompleteCount: number;
+  // Interval union of all (clamped) request intervals.
+  inFlightMs: number;
+  inFlightPercentage: number;
+  // Max simultaneous in-flight requests.
+  peakConcurrency: number;
+  // Requests with responseStatus >= 400.
+  errorCount: number;
+  cacheHit: number;
+  cacheMiss: number;
+  cacheUnknown: number;
+  rangeDurationMs: number;
+  slowest: NetworkSummaryRequest[];
+};
+
+/**
+ * Per-thread breakdown row in a profile-wide network summary. Counts are the
+ * thread's own (not deduped) so process attribution stays visible.
+ */
+export type ProfileNetworkThreadBreakdown = {
+  threadHandle: string;
+  threadName: string;
+  requestCount: number;
+  inFlightMs: number;
+};
+
+/**
+ * Profile-wide network summary. The headline numbers are deduped across
+ * processes (the parent process carries a copy of every request), while
+ * `byThread` keeps each thread's own counts for attribution.
+ */
+export type ProfileNetworkSummary = {
+  requestCount: number;
+  incompleteCount: number;
+  inFlightMs: number;
+  inFlightPercentage: number;
+  peakConcurrency: number;
+  errorCount: number;
+  rangeDurationMs: number;
+  slowest: NetworkSummaryRequest[];
+  byThread: ProfileNetworkThreadBreakdown[];
+};
+
+export type ThreadMarkersResult = {
+  type: 'thread-markers';
+  threadHandle: string;
+  friendlyThreadName: string;
+  totalMarkerCount: number;
+  filteredMarkerCount: number;
+  fullRangeMarkerCount?: number;
+  filters?: {
+    searchString?: string;
+    minDuration?: number;
+    maxDuration?: number;
+    category?: string;
+    hasStack?: boolean;
+    limit?: number;
+  };
+  byType: Array<{
+    markerName: string;
+    count: number;
+    isInterval: boolean;
+    durationStats?: DurationStats;
+    rateStats?: RateStats;
+    topMarkers: TopMarker[];
+    subGroups?: MarkerGroupData[];
+    subGroupKey?: string;
+  }>;
+  byCategory: Array<{
+    categoryName: string;
+    categoryIndex: number;
+    count: number;
+    percentage: number;
+  }>;
+  customGroups?: MarkerGroupData[];
+  flatMarkers?: FlatMarkerItem[];
+};
+
+export type DurationStats = {
+  min: number;
+  max: number;
+  avg: number;
+  median: number;
+  p95: number;
+  p99: number;
+};
+
+export type RateStats = {
+  markersPerSecond: number;
+  minGap: number;
+  avgGap: number;
+  maxGap: number;
+};
+
+export type MarkerGroupData = {
+  groupName: string;
+  count: number;
+  isInterval: boolean;
+  durationStats?: DurationStats;
+  rateStats?: RateStats;
+  topMarkers: TopMarker[];
+  subGroups?: MarkerGroupData[];
+};
+
+/** One row of `profile markers`: a `thread markers --list` row plus its thread. */
+export type ProfileMarkerItem = FlatMarkerItem & {
+  threadHandle: string;
+  threadName: string; // Friendly thread name, e.g. "GPU Process"
+  processName: string;
+  pid: string;
+};
+
+/** Per-thread match count for a cross-thread marker search. */
+export type ProfileMarkersThreadBreakdown = {
+  threadHandle: string;
+  threadName: string;
+  processName: string;
+  pid: string;
+  count: number;
+};
+
+/**
+ * Cross-thread marker search: one chronological list gathered from every
+ * thread, plus a per-thread breakdown.
+ */
+export type ProfileMarkersResult = {
+  type: 'profile-markers';
+  markers: ProfileMarkerItem[]; // Chronological, after limit
+  totalCount: number; // Matches across all searched threads, before limit
+  searchedThreadCount: number;
+  matchingThreadCount: number;
+  byThread: ProfileMarkersThreadBreakdown[]; // Sorted by count, descending
+  // Set when rows were dropped at the hard row ceiling.
+  maxRowsClamped?: number;
+  filters?: {
+    thread?: string;
+    searchString?: string;
+    category?: string;
+    minDuration?: number;
+    maxDuration?: number;
+    hasStack?: boolean;
+    limit?: number;
+  };
+};
+
+export type ProfileLogsResult = {
+  type: 'profile-logs';
+  entries: string[];
+  totalCount: number;
+  filters?: {
+    thread?: string;
+    module?: string;
+    level?: string;
+    search?: string;
+    limit?: number;
+  };
+};
+
+export type ThreadFunctionsResult = {
+  type: 'thread-functions';
+  threadHandle: string;
+  friendlyThreadName: string;
+  activeOnly?: boolean;
+  activeFilters?: FilterEntry[];
+  ephemeralFilters?: SampleFilterSpec[];
+  callTreeSummaryStrategy: CallTreeSummaryStrategy;
+  weightType: WeightType;
+  totalFunctionCount: number;
+  filteredFunctionCount: number;
+  filters?: {
+    searchString?: string;
+    minSelf?: number;
+    limit?: number;
+  };
+  functions: Array<
+    {
+      functionHandle: string;
+      selfSamples: number;
+      selfPercentage: number;
+      totalSamples: number;
+      totalPercentage: number;
+      // Optional full profile percentages (present when zoomed)
+      fullSelfPercentage?: number;
+      fullTotalPercentage?: number;
+    } & FunctionDisplayInfo
+  >;
+};
+
+// ===== Marker Commands =====
+
+export type MarkerInfoResult = {
+  type: 'marker-info';
+  threadHandle: string;
+  friendlyThreadName: string;
+  markerHandle: string;
+  markerIndex: number;
+  name: string;
+  tooltipLabel?: string;
+  markerType?: string;
+  category: {
+    index: number;
+    name: string;
+  };
+  start: number; // Ms since the profile start, as in `FlatMarkerItem`
+  end: number | null;
+  duration?: number;
+  fields?: MarkerFieldValue[];
+  schema?: {
+    description?: string;
+  };
+  stack?: StackTraceData;
+};
+
+/** Result of `marker info` with more than one handle. */
+export type MarkerInfoMultiResult = {
+  type: 'marker-info-multi';
+  /** Handles requested, ranges expanded, in requested order. */
+  requested: string[];
+  markers: MarkerInfoResult[];
+  errors: Array<{
+    markerHandle: string;
+    error: string;
+  }>;
+  /**
+   * Set when a range resolved into several threads, which means it ran past the
+   * end of the listing the user was reading.
+   */
+  rangeSpansThreadsWarning?: {
+    ranges: string[];
+    threadHandles: string[];
+  };
+};
+
+export type MarkerStackResult = {
+  type: 'marker-stack';
+  threadHandle: string;
+  friendlyThreadName: string;
+  markerHandle: string;
+  markerIndex: number;
+  markerName: string;
+  stack: StackTraceData | null;
+};
+
+export type StackTraceData = {
+  capturedAt?: number; // Milliseconds since the profile start (`rootRange.start`)
+  frames: FunctionDisplayInfo[];
+  truncated: boolean;
+};
+
+// ===== Thread Page Load Command =====
+
+export type NavigationMilestone = {
+  name: string; // 'FCP', 'LCP', 'DCL', 'Load', 'TTI'
+  timeMs: number; // relative to navStart
+  markerHandle: string; // e.g. "m-3"
+};
+
+export type PageLoadResourceEntry = {
+  filename: string; // last URL path segment, truncated to 50 chars
+  url: string;
+  durationMs: number;
+  resourceType: string; // 'JS', 'CSS', 'Image', 'HTML', 'JSON', 'Font', 'Wasm', 'Other'
+  markerHandle: string; // e.g. "m-5"
+};
+
+export type PageLoadCategoryEntry = {
+  name: string;
+  count: number;
+  percentage: number;
+};
+
+export type JankFunction = {
+  name: string;
+  sampleCount: number;
+};
+
+export type JankPeriod = {
+  startMs: number; // relative to navStart
+  durationMs: number;
+  markerHandle: string; // e.g. "m-7"
+  startHandle: string; // timestamp handle for zoom, e.g. "ts-3"
+  endHandle: string; // timestamp handle for zoom, e.g. "ts-4"
+  topFunctions: JankFunction[];
+  categories: PageLoadCategoryEntry[];
+};
+
+export type ThreadPageLoadResult = {
+  type: 'thread-page-load';
+  threadHandle: string;
+  friendlyThreadName: string;
+  url: string | null;
+  navigationIndex: number; // 1-based
+  navigationTotal: number;
+  navStartMs: number; // absolute profile time of nav start
+  milestones: NavigationMilestone[];
+  // Resources
+  resourceCount: number;
+  resourceAvgMs: number | null;
+  resourceMaxMs: number | null;
+  resourcesByType: Array<{ type: string; count: number; percentage: number }>;
+  topResources: PageLoadResourceEntry[]; // top 10 by duration
+  // CPU categories
+  totalSamples: number;
+  categories: PageLoadCategoryEntry[];
+  // Jank
+  jankTotal: number;
+  jankPeriods: JankPeriod[]; // limited by jankLimit
+};
+
+// ===== Counter Commands =====
+
+/**
+ * A single range-aggregate stat for a counter, derived from one of the
+ * counter's own `display.tooltipRows`. Only the rows whose data source is a
+ * whole-range aggregate (`count-range`, `committed-range-total`) are surfaced;
+ * per-sample and preview-selection rows have no CLI equivalent and are skipped.
+ * `label`, `value`, and `formattedValue` come straight from the tooltip schema,
+ * so the CLI and the timeline tooltips stay in lockstep.
+ */
+export type CounterStat = {
+  source: CounterTooltipDataSource;
+  label: string;
+  value: number;
+  formattedValue: string;
+  carbon?: string;
+};
+
+/**
+ * One-line summary of a counter, shared by `counter list`, `counter info`, and
+ * the `profile info --counters` section. The `stats` cover the current
+ * committed (zoom) range, or the whole profile when not zoomed.
+ */
+export type CounterSummary = {
+  counterHandle: string; // e.g. "c-0"
+  counterIndex: number;
+  name: string; // raw counter name, e.g. "malloc"
+  label: string; // display.label || name, e.g. "Memory"
+  category: string; // e.g. "Memory"
+  unit: string; // display.unit, e.g. "bytes"
+  graphType: CounterGraphType;
+  color: string;
+  pid: string;
+  processIndex: number;
+  processName: string; // e.g. "Parent Process"
+  etld1?: string; // eTLD+1 of an isolated content process, when known
+  mainThreadIndex: number;
+  mainThreadHandle: string; // e.g. "t-0"
+  mainThreadName: string;
+  rangeSampleCount: number; // samples within the current range
+  stats: CounterStat[]; // range-aggregate stats from the tooltip schema
+  // Raw values for a sparkline of the counter's trajectory over the current
+  // view. Empty when the counter has no in-range samples.
+  graph: number[];
+};
+
+export type CounterListResult = {
+  type: 'counter-list';
+  counters: CounterSummary[];
+};
+
+/**
+ * One time bucket of a counter's "over time" breakdown. The current view is
+ * split into equal-width buckets; each carries the bucket's value formatted via
+ * the tooltip schema. `delta` is present only for accumulated counters.
+ */
+export type CounterTimeBucket = {
+  startTime: number; // absolute time of the bucket start
+  startTimeName: string; // e.g. "ts-0"
+  startTimeStr: string; // human-readable, relative to profile start, e.g. "1.4s"
+  endTime: number;
+  endTimeName: string;
+  endTimeStr: string;
+  value: number;
+  formattedValue: string;
+  delta?: number;
+  formattedDelta?: string; // signed, e.g. "+6.3 MB"
+  // Ratio (0..1) of the bucket's value: share of the range total for rate
+  // counters, share of the range peak for accumulated counters. Omitted for
+  // process CPU, whose value is already a percentage.
+  percentage?: number;
+  formattedPercentage?: string; // e.g. "60%"
+  carbon?: string; // when the row's format requests a CO2e estimate
+};
+
+export type CounterInfoResult = CounterSummary & {
+  type: 'counter-info';
+  description: string;
+  sampleCount: number; // total samples in the counter (whole profile)
+  // First/last in-range sample, ms since the profile start.
+  rangeStart: number | null;
+  rangeEnd: number | null;
+  overTime: CounterTimeBucket[]; // per-bucket values across the current view
+};
+
+// ===== Profile Commands =====
+
+export type ProfileInfoResult = {
+  type: 'profile-info';
+  name: string;
+  platform: string;
+  threadCount: number;
+  processCount: number;
+  showAll?: boolean;
+  searchQuery?: string;
+  processes: Array<{
+    processIndex: number;
+    pid: string;
+    name: string;
+    etld1?: string;
+    cpuMs: number;
+    startTime?: number;
+    startTimeName?: string;
+    endTime?: number | null;
+    endTimeName?: string | null;
+    threads: Array<{
+      threadIndex: number;
+      threadHandle: string;
+      name: string;
+      tid: number | string;
+      cpuMs: number;
+    }>;
+    remainingThreads?: {
+      count: number;
+      combinedCpuMs: number;
+      maxCpuMs: number;
+    };
+    counters?: CounterSummary[];
+  }>;
+  remainingProcesses?: {
+    count: number;
+    combinedCpuMs: number;
+    maxCpuMs: number;
+  };
+  cpuActivity: Array<{
+    startTime: number;
+    startTimeName: string;
+    startTimeStr: string;
+    endTime: number;
+    endTimeName: string;
+    endTimeStr: string;
+    cpuMs: number;
+    depthLevel: number;
+  }> | null;
+  networkActivity: ProfileNetworkSummary | null;
+};
+
+/**
+ * Structured view of the profile's `meta` field, mirroring the "Profile Info"
+ * panel in the web UI (`src/components/app/MenuButtons/MetaInfo.tsx`). Fields
+ * are grouped by the panel's sections and are all optional except `interval`
+ * and `product`. Absent fields are omitted entirely rather than set to
+ * `undefined`, so the text formatter and `--json` output stay compact.
+ */
+export type ProfileMetaResult = {
+  type: 'profile-meta';
+
+  // ===== Recording =====
+  // Wall-clock start of the recording (ms since epoch). When
+  // `meta.profilingStartTime` is defined this is `startTime + profilingStartTime`
+  // (the actual moment recording began), otherwise the raw `meta.startTime`.
+  startTime?: number;
+  startTimeFormatted?: string; // ISO string of `startTime`
+  // Length of the recording in milliseconds, when derivable.
+  durationMs?: number;
+  endTime?: number; // raw `meta.endTime` (main process ended, ms since epoch)
+  endTimeFormatted?: string; // ISO string of `endTime`
+  interval: number; // sampling interval, in ms (or bytes for size profiles)
+  symbolicated?: boolean;
+  // Recording buffer, from `meta.configuration`. Capacity is converted from
+  // entries (8 bytes each) to bytes here.
+  bufferCapacityBytes?: number;
+  bufferDuration?: number; // buffer duration in seconds
+  features?: string[]; // enabled profiler features
+  threadsFilter?: string[]; // thread name filters
+
+  // ===== Application =====
+  product: string;
+  productAndVersion?: string; // e.g. "Firefox 130"
+  uptimeMs?: number; // time from process start to recording start
+  appBuildID?: string;
+  sourceURL?: string;
+  updateChannel?: string;
+  debug?: boolean;
+  arguments?: string;
+  extensions?: Array<{ name: string; id: string; baseURL?: string }>;
+
+  // ===== Platform =====
+  platform?: string; // formatted via `formatPlatform`
+  oscpu?: string; // raw `meta.oscpu`
+  abi?: string;
+  device?: string;
+  cpuName?: string;
+  physicalCPUs?: number;
+  logicalCPUs?: number;
+  mainMemoryBytes?: number;
+
+  // ===== Import / misc =====
+  importedFrom?: string;
+  fileName?: string;
+  fileSize?: number;
+  version?: number; // Gecko profile format version
+  preprocessedProfileVersion?: number;
+  sampleUnits?: SampleUnits;
+
+  // ===== Extra =====
+  // Free-form importer sections (`meta.extra`). `value` is passed through raw so
+  // `--json` stays machine-usable; `formatted` is the human-readable string
+  // produced with the entry's marker-schema format.
+  extra?: Array<{
+    label: string;
+    entries: Array<{ label: string; value: any; formatted: string }>;
+  }>;
+};
+
+// ===== Sourcemap Commands =====
+
+/**
+ * Where a source's map lives. Firefox stores an inline map's entire `data:` URL
+ * in the source table, so for those we report facts about the map rather than the
+ * payload, which can run to megabytes of base64.
+ *
+ * `mediaType` is null when the `data:` URL is malformed. `byteLength` is the
+ * length of the whole `data:` URL, header included.
+ */
+export type SourceMapLocation =
+  | { kind: 'url'; url: string }
+  | { kind: 'inline'; mediaType: string | null; byteLength: number };
+
+/**
+ * One bundle source that carries a `sourceMapURL` and is therefore eligible to
+ * have a user-supplied `.map` applied. `sourceHandle` is the `src-N` handle for
+ * `sourcemap apply --to`.
+ */
+export type SourceEntry = {
+  sourceHandle: string; // "src-N"
+  sourceIndex: number;
+  filename: string;
+  sourceMap: SourceMapLocation;
+};
+
+export type SourceMapSourcesResult = {
+  type: 'sourcemap-sources';
+  sources: SourceEntry[];
+};
+
+/**
+ * Outcome of `profile save`: where the profile was written and how big it is.
+ */
+export type ProfileSaveResult = {
+  type: 'profile-save';
+  path: string;
+  format: ProfileFileFormat;
+  bytes: number;
+};
+
+/**
+ * Outcome of `sourcemap apply`, mirroring `ApplySourceMapFileResult` from the
+ * web thunk. `unchanged` means the map was matched to a source but symbolication
+ * changed nothing. `ambiguous` and `error` map to a non-zero CLI exit.
+ *
+ * `ambiguous` covers both "the map matched several sources" and "the map
+ * matched none of them", which `reason` tells apart. `candidates` is what to
+ * pass to `--to` in either case: the sources that matched, or every eligible
+ * source when nothing matched.
+ */
+export type ApplySourceMapResult =
+  | { type: 'sourcemap-applied'; sourceHandle: string; filename: string }
+  | { type: 'sourcemap-unchanged'; sourceHandle: string; filename: string }
+  | {
+      type: 'sourcemap-ambiguous';
+      reason: 'multiple-matches' | 'no-matches';
+      candidates: SourceEntry[];
+    }
+  | {
+      type: 'sourcemap-error';
+      error:
+        | 'invalid-source-map'
+        | 'no-eligible-sources'
+        | 'symbolication-failed';
+    };

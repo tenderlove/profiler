@@ -1,0 +1,596 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+import {
+  getSelectedThreadIndexes,
+  getAllCommittedRanges,
+} from 'firefox-profiler/selectors/url-state';
+import {
+  getCategories,
+  getDefaultCategory,
+  getProfile,
+  getThreadCPUTimeMs,
+} from 'firefox-profiler/selectors/profile';
+import { getProcessName } from '../process-thread-list';
+import { collectSliceTree } from '../cpu-activity';
+import { computeThreadNetworkSummary } from '../network-summary';
+import { getThreadSelectors } from 'firefox-profiler/selectors/per-thread';
+import { assertExhaustiveCheck } from 'firefox-profiler/utils/types';
+import type {
+  ThreadInfoResult,
+  ThreadListItem,
+  ThreadListOptions,
+  ThreadListResult,
+  ThreadListSort,
+  ThreadSamplesResult,
+  ThreadSamplesTopDownResult,
+  ThreadSamplesBottomUpResult,
+  ThreadFunctionsResult,
+  FunctionFilterOptions,
+  TopFunctionInfo,
+} from '../types';
+import {
+  extractFunctionData,
+  formatFunctionNameWithLibrary,
+} from '../function-list';
+import { collectThreadCategoryBreakdown } from './category-breakdown';
+import { collectCallTree, inlineStatusForNode } from './call-tree';
+import type { CallTreeCollectionOptions } from './call-tree';
+import {
+  computeCallTreeTimings,
+  getCallTree,
+  computeCallNodeSelfAndSummary,
+  extractSamplesLikeTable,
+} from 'firefox-profiler/profile-logic/call-tree';
+import { getInvertedCallNodeInfo } from 'firefox-profiler/profile-logic/profile-data';
+import type { Store } from '../../types/store';
+import type { TimestampManager } from '../timestamps';
+import type { ThreadMap } from '../thread-map';
+import { getFunctionHandle } from '../function-map';
+import type { MarkerMap } from '../marker-map';
+import type { CallNodePath } from 'firefox-profiler/types';
+
+const threadNameSort = new Intl.Collator('en-US', { numeric: true });
+
+/**
+ * Collect the flat thread table shown by `thread list`.
+ *
+ * This is the inventory counterpart of `profile info`: one row per thread of the
+ * profile, rather than a per-process tree limited to the busiest processes.
+ * `cpuMs` comes from the same selector `profile info` uses, and `markerCount` is
+ * the derived marker count `thread markers` reports for that thread (start/end
+ * pairs merged, jank markers added), so a row's count matches what `thread
+ * markers --thread <handle>` then prints. Both cover the whole profile
+ * regardless of the current zoom, matching `profile info`.
+ */
+export function collectThreadList(
+  store: Store,
+  threadMap: ThreadMap,
+  processIndexMap: Map<string, number>,
+  options: ThreadListOptions = {}
+): ThreadListResult {
+  const state = store.getState();
+  const profile = getProfile(state);
+  const threadCPUTimeMs = getThreadCPUTimeMs(state);
+  const selectedThreadIndexes = getSelectedThreadIndexes(state);
+  const sort: ThreadListSort = options.sort ?? 'cpu';
+
+  const allThreads: ThreadListItem[] = profile.threads.map((thread, index) => {
+    const processIndex = processIndexMap.get(thread.pid);
+    if (processIndex === undefined) {
+      throw new Error(`Process index not found for pid ${thread.pid}`);
+    }
+    return {
+      threadHandle: threadMap.handleForThreadIndex(index),
+      threadIndex: index,
+      name: thread.name,
+      processName: getProcessName(thread),
+      etld1: thread['eTLD+1'],
+      pid: thread.pid,
+      processIndex,
+      tid: thread.tid,
+      cpuMs: threadCPUTimeMs ? threadCPUTimeMs[index] : 0,
+      markerCount: getThreadSelectors(index).getFullMarkerList(state).length,
+      selected: selectedThreadIndexes.has(index),
+    };
+  });
+
+  const search = options.searchString;
+  const matching =
+    search !== undefined && search !== ''
+      ? allThreads.filter((item) => {
+          const query = search.toLowerCase();
+          return (
+            item.name.toLowerCase().includes(query) ||
+            item.processName.toLowerCase().includes(query) ||
+            (item.etld1 !== undefined &&
+              item.etld1.toLowerCase().includes(query)) ||
+            item.pid.includes(query) ||
+            String(item.tid).includes(query) ||
+            item.threadHandle === query
+          );
+        })
+      : allThreads;
+
+  // Sorts are stable in JS, so ties keep the profile's thread order.
+  const sorted = matching.slice();
+  switch (sort) {
+    case 'cpu':
+      sorted.sort((a, b) => b.cpuMs - a.cpuMs);
+      break;
+    case 'markers':
+      sorted.sort((a, b) => b.markerCount - a.markerCount);
+      break;
+    case 'name':
+      sorted.sort(
+        (a, b) =>
+          threadNameSort.compare(a.processName, b.processName) ||
+          threadNameSort.compare(a.name, b.name)
+      );
+      break;
+    case 'index':
+      sorted.sort((a, b) => a.threadIndex - b.threadIndex);
+      break;
+    default:
+      throw assertExhaustiveCheck(sort, 'thread list sort');
+  }
+
+  const limit = options.limit;
+  const threads =
+    limit !== undefined && limit > 0 ? sorted.slice(0, limit) : sorted;
+
+  return {
+    type: 'thread-list',
+    threads,
+    totalThreadCount: profile.threads.length,
+    processCount: new Set(profile.threads.map((t) => t.pid)).size,
+    hiddenByLimit: sorted.length - threads.length,
+    sort,
+    searchQuery: search,
+  };
+}
+
+/**
+ * Collect thread info as structured data.
+ */
+export function collectThreadInfo(
+  store: Store,
+  timestampManager: TimestampManager,
+  threadMap: ThreadMap,
+  markerMap: MarkerMap,
+  threadHandle?: string
+): ThreadInfoResult {
+  const state = store.getState();
+  const threadIndexes =
+    threadHandle !== undefined
+      ? threadMap.threadIndexesForHandle(threadHandle)
+      : getSelectedThreadIndexes(state);
+  const threadSelectors = getThreadSelectors(threadIndexes);
+  const thread = threadSelectors.getRawThread(state);
+  const friendlyThreadName = threadSelectors.getFriendlyThreadName(state);
+  const cpuActivitySlices =
+    threadSelectors.getRangeFilteredActivitySlices(state);
+  const cpuActivity =
+    cpuActivitySlices !== null
+      ? collectSliceTree(cpuActivitySlices, timestampManager)
+      : null;
+
+  const networkActivity = computeThreadNetworkSummary(
+    store,
+    threadIndexes,
+    markerMap,
+    threadMap
+  );
+
+  const actualThreadHandle =
+    threadHandle ?? threadMap.handleForThreadIndexes(threadIndexes);
+
+  return {
+    type: 'thread-info',
+    threadHandle: actualThreadHandle,
+    name: thread.name,
+    friendlyName: friendlyThreadName,
+    tid: thread.tid,
+    createdAt: thread.registerTime,
+    createdAtName: timestampManager.nameForTimestamp(thread.registerTime),
+    endedAt: thread.unregisterTime,
+    endedAtName:
+      thread.unregisterTime !== null
+        ? timestampManager.nameForTimestamp(thread.unregisterTime)
+        : null,
+    sampleCount: thread.samples.length,
+    markerCount: thread.markers.length,
+    cpuActivity,
+    networkActivity,
+    availableStrategies:
+      threadSelectors.getAvailableCallTreeSummaryStrategies(state),
+  };
+}
+
+/**
+ * Collect thread samples data in structured format.
+ */
+export function collectThreadSamples(
+  store: Store,
+  threadMap: ThreadMap,
+  threadHandle?: string
+): ThreadSamplesResult {
+  const state = store.getState();
+  const threadIndexes =
+    threadHandle !== undefined
+      ? threadMap.threadIndexesForHandle(threadHandle)
+      : getSelectedThreadIndexes(state);
+  const threadHandleDisplay = threadMap.handleForThreadIndexes(threadIndexes);
+  const threadSelectors = getThreadSelectors(threadIndexes);
+  const friendlyThreadName = threadSelectors.getFriendlyThreadName(state);
+  const thread = threadSelectors.getFilteredThread(state);
+
+  // Get call trees for analysis
+  const functionListTree = threadSelectors.getFunctionListTree(state);
+  const callTree = threadSelectors.getCallTree(state);
+
+  // Extract function data
+  const functions = extractFunctionData(functionListTree, thread);
+
+  // Sort by total and take top 50
+  const sortedByTotal = functions
+    .slice()
+    .sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
+    .slice(0, 50);
+
+  // Sort by self and take top 50
+  const sortedBySelf = functions
+    .slice()
+    .sort((a, b) => Math.abs(b.self) - Math.abs(a.self))
+    .slice(0, 50);
+
+  // Convert top functions to structured format
+  const topFunctionsByTotal: TopFunctionInfo[] = sortedByTotal.map((func) => ({
+    functionHandle: getFunctionHandle(func.funcIndex),
+    functionIndex: func.funcIndex,
+    name: func.funcName,
+    nameWithLibrary: func.funcName, // Already includes library from extractFunctionData
+    totalSamples: func.total,
+    totalPercentage: func.totalRelative * 100,
+    selfSamples: func.self,
+    selfPercentage: func.selfRelative * 100,
+    library: undefined,
+  }));
+
+  const topFunctionsBySelf: TopFunctionInfo[] = sortedBySelf.map((func) => ({
+    functionHandle: getFunctionHandle(func.funcIndex),
+    functionIndex: func.funcIndex,
+    name: func.funcName,
+    nameWithLibrary: func.funcName, // Already includes library from extractFunctionData
+    totalSamples: func.total,
+    totalPercentage: func.totalRelative * 100,
+    selfSamples: func.self,
+    selfPercentage: func.selfRelative * 100,
+    library: undefined,
+  }));
+
+  // Create a map from funcIndex to function data for quick lookup
+  const funcMap = new Map(functions.map((f) => [f.funcIndex, f]));
+
+  // Collect heaviest stack
+  const roots = callTree.getRoots();
+  let heaviestStack: ThreadSamplesResult['heaviestStack'] = {
+    selfSamples: 0,
+    frameCount: 0,
+    hasInlinedFrames: false,
+    frames: [],
+  };
+
+  if (roots.length > 0) {
+    let heaviestPath: CallNodePath = [];
+    let maxAbsSelfSamples = -1;
+
+    for (const root of roots) {
+      const candidatePath = callTree._internal.findHeaviestPathInSubtree(root);
+      const leafNodeIndex =
+        callTree._callNodeInfo.getCallNodeIndexFromPath(candidatePath);
+
+      if (leafNodeIndex === null) {
+        continue;
+      }
+
+      const candidateSelfSamples = Math.abs(
+        callTree.getNodeData(leafNodeIndex).self
+      );
+      if (candidateSelfSamples > maxAbsSelfSamples) {
+        heaviestPath = candidatePath;
+        maxAbsSelfSamples = candidateSelfSamples;
+      }
+    }
+
+    if (heaviestPath.length > 0) {
+      const callNodeInfo = callTree._callNodeInfo;
+      const leafNodeIndex = callNodeInfo.getCallNodeIndexFromPath(heaviestPath);
+
+      if (leafNodeIndex !== null) {
+        const leafNodeData = callTree.getNodeData(leafNodeIndex);
+
+        let hasInlinedFrames = false;
+        const frames = heaviestPath.map((funcIndex, depth) => {
+          const funcName = formatFunctionNameWithLibrary(funcIndex, thread);
+          const funcData = funcMap.get(funcIndex);
+          const prefixPath = heaviestPath.slice(0, depth + 1);
+          const frameCallNodeIndex =
+            callNodeInfo.getCallNodeIndexFromPath(prefixPath);
+          const inlineStatus =
+            frameCallNodeIndex !== null
+              ? inlineStatusForNode(callTree, frameCallNodeIndex)
+              : undefined;
+          if (inlineStatus !== undefined) {
+            hasInlinedFrames = true;
+          }
+          return {
+            funcIndex,
+            name: funcName,
+            nameWithLibrary: funcName,
+            totalSamples: funcData?.total ?? 0,
+            totalPercentage: (funcData?.totalRelative ?? 0) * 100,
+            selfSamples: funcData?.self ?? 0,
+            selfPercentage: (funcData?.selfRelative ?? 0) * 100,
+            inlineStatus,
+          };
+        });
+
+        heaviestStack = {
+          selfSamples: leafNodeData.self,
+          frameCount: heaviestPath.length,
+          hasInlinedFrames,
+          frames,
+        };
+      }
+    }
+  }
+
+  return {
+    type: 'thread-samples',
+    threadHandle: threadHandleDisplay,
+    friendlyThreadName,
+    categoryBreakdown: collectThreadCategoryBreakdown(store, threadIndexes),
+    callTreeSummaryStrategy: threadSelectors.getCallTreeSummaryStrategy(state),
+    weightType: threadSelectors.getWeightTypeForCallTree(state),
+    topFunctionsByTotal,
+    topFunctionsBySelf,
+    heaviestStack,
+  };
+}
+
+/**
+ * Collect thread samples bottom-up data in structured format.
+ * Shows the inverted call tree (callers of hot functions).
+ */
+export function collectThreadSamplesBottomUp(
+  store: Store,
+  threadMap: ThreadMap,
+  threadHandle?: string,
+  callTreeOptions?: CallTreeCollectionOptions
+): ThreadSamplesBottomUpResult {
+  const state = store.getState();
+  const threadIndexes =
+    threadHandle !== undefined
+      ? threadMap.threadIndexesForHandle(threadHandle)
+      : getSelectedThreadIndexes(state);
+  const threadHandleDisplay = threadMap.handleForThreadIndexes(threadIndexes);
+  const threadSelectors = getThreadSelectors(threadIndexes);
+  const friendlyThreadName = threadSelectors.getFriendlyThreadName(state);
+  const thread = threadSelectors.getFilteredThread(state);
+
+  // Collect inverted call tree
+  const callNodeInfo = threadSelectors.getCallNodeInfo(state);
+  const categories = getCategories(state);
+  const defaultCategory = getDefaultCategory(state);
+  const weightType = threadSelectors.getWeightTypeForCallTree(state);
+
+  const samples = threadSelectors.getPreviewFilteredCtssSamples(state);
+  const sampleIndexToCallNodeIndex =
+    threadSelectors.getPreviewFilteredCtssSampleCallNodes(state);
+
+  const callNodeSelfAndSummary = computeCallNodeSelfAndSummary(
+    samples,
+    sampleIndexToCallNodeIndex,
+    callNodeInfo.getCallNodeTable().length
+  );
+
+  const invertedCallNodeInfo = getInvertedCallNodeInfo(
+    callNodeInfo,
+    defaultCategory,
+    thread.funcTable.length
+  );
+
+  const invertedTimings = computeCallTreeTimings(
+    invertedCallNodeInfo,
+    callNodeSelfAndSummary
+  );
+
+  const invertedTree = getCallTree(
+    thread,
+    invertedCallNodeInfo,
+    categories,
+    samples,
+    invertedTimings,
+    weightType
+  );
+
+  const invertedCallTree = collectCallTree(invertedTree, callTreeOptions);
+
+  return {
+    type: 'thread-samples-bottom-up',
+    threadHandle: threadHandleDisplay,
+    friendlyThreadName,
+    callTreeSummaryStrategy: threadSelectors.getCallTreeSummaryStrategy(state),
+    weightType,
+    invertedCallTree,
+  };
+}
+
+/**
+ * Collect thread samples top-down data in structured format.
+ * Shows the regular call tree (top-down view of hot paths).
+ */
+export function collectThreadSamplesTopDown(
+  store: Store,
+  threadMap: ThreadMap,
+  threadHandle?: string,
+  callTreeOptions?: CallTreeCollectionOptions
+): ThreadSamplesTopDownResult {
+  const state = store.getState();
+  const threadIndexes =
+    threadHandle !== undefined
+      ? threadMap.threadIndexesForHandle(threadHandle)
+      : getSelectedThreadIndexes(state);
+  const threadHandleDisplay = threadMap.handleForThreadIndexes(threadIndexes);
+  const threadSelectors = getThreadSelectors(threadIndexes);
+  const friendlyThreadName = threadSelectors.getFriendlyThreadName(state);
+  const callTree = threadSelectors.getCallTree(state);
+
+  // Collect regular call tree
+  const regularCallTree = collectCallTree(callTree, callTreeOptions);
+
+  return {
+    type: 'thread-samples-top-down',
+    threadHandle: threadHandleDisplay,
+    friendlyThreadName,
+    callTreeSummaryStrategy: threadSelectors.getCallTreeSummaryStrategy(state),
+    weightType: threadSelectors.getWeightTypeForCallTree(state),
+    regularCallTree,
+  };
+}
+
+/**
+ * Collect thread functions data in structured format.
+ * Lists all functions with their weight percentages, supporting search and filtering.
+ */
+export function collectThreadFunctions(
+  store: Store,
+  threadMap: ThreadMap,
+  threadHandle?: string,
+  filterOptions?: FunctionFilterOptions
+): ThreadFunctionsResult {
+  const state = store.getState();
+  const threadIndexes =
+    threadHandle !== undefined
+      ? threadMap.threadIndexesForHandle(threadHandle)
+      : getSelectedThreadIndexes(state);
+  const threadHandleDisplay = threadMap.handleForThreadIndexes(threadIndexes);
+  const threadSelectors = getThreadSelectors(threadIndexes);
+  const friendlyThreadName = threadSelectors.getFriendlyThreadName(state);
+  const thread = threadSelectors.getFilteredThread(state);
+
+  // Get function list tree
+  const functionListTree = threadSelectors.getFunctionListTree(state);
+
+  // Extract function data
+  const allFunctions = extractFunctionData(functionListTree, thread);
+  const totalFunctionCount = allFunctions.length;
+
+  // Check if we're zoomed (have committed ranges)
+  const committedRanges = getAllCommittedRanges(state);
+  const isZoomed = committedRanges.length > 0;
+
+  // If zoomed, get full profile total samples for percentage calculation
+  // We can compute this from any function in allFunctions that has a non-zero totalRelative
+  // Formula: fullTotalSamples = total / totalRelative
+  // But since totalRelative is based on current view, we need the UNzoomed totalRelative
+  // Simpler approach: The unzoomed strategy table has all samples - count them directly
+  let fullProfileTotalSamples: number | null = null;
+  if (isZoomed) {
+    // Use the same weighting as the call tree: sum absolute weights, exclude null-stack samples
+    const unzoomedSamples = extractSamplesLikeTable(
+      threadSelectors.getThread(state),
+      threadSelectors.getCallTreeSummaryStrategy(state)
+    );
+    const { weight, stack } = unzoomedSamples;
+    let total = 0;
+    for (let i = 0; i < unzoomedSamples.length; i++) {
+      if (stack[i] !== null) {
+        total += weight ? Math.abs(weight[i] ?? 1) : 1;
+      }
+    }
+    fullProfileTotalSamples = total;
+  }
+
+  // Apply filters
+  let filteredFunctions = allFunctions;
+
+  // Filter by search string (case-insensitive substring match)
+  if (filterOptions?.searchString) {
+    const searchLower = filterOptions.searchString.toLowerCase();
+    filteredFunctions = filteredFunctions.filter((func) =>
+      func.funcName.toLowerCase().includes(searchLower)
+    );
+  }
+
+  if (filterOptions?.minSelf !== undefined) {
+    const minSelfFraction = filterOptions.minSelf / 100;
+    filteredFunctions = filteredFunctions.filter(
+      (func) => Math.abs(func.selfRelative) >= minSelfFraction
+    );
+  }
+
+  filteredFunctions.sort((a, b) => Math.abs(b.self) - Math.abs(a.self));
+
+  // Apply limit
+  const limit = filterOptions?.limit ?? filteredFunctions.length;
+  const limitedFunctions = filteredFunctions.slice(0, limit);
+
+  // Convert to structured format
+  const functions: ThreadFunctionsResult['functions'] = limitedFunctions.map(
+    (func) => {
+      const nameWithLibrary = func.funcName;
+      // Extract library name if present (format: "library!function")
+      const bangIndex = nameWithLibrary.indexOf('!');
+      const library =
+        bangIndex !== -1 ? nameWithLibrary.substring(0, bangIndex) : undefined;
+      const name =
+        bangIndex !== -1
+          ? nameWithLibrary.substring(bangIndex + 1)
+          : nameWithLibrary;
+
+      // Get full profile percentages if zoomed
+      let fullSelfPercentage: number | undefined;
+      let fullTotalPercentage: number | undefined;
+      if (fullProfileTotalSamples !== null) {
+        // Calculate percentages relative to full profile
+        fullSelfPercentage = (func.self / fullProfileTotalSamples) * 100;
+        fullTotalPercentage = (func.total / fullProfileTotalSamples) * 100;
+      }
+
+      return {
+        functionHandle: getFunctionHandle(func.funcIndex),
+        functionIndex: func.funcIndex,
+        name,
+        nameWithLibrary,
+        selfSamples: func.self,
+        selfPercentage: func.selfRelative * 100,
+        totalSamples: func.total,
+        totalPercentage: func.totalRelative * 100,
+        library,
+        fullSelfPercentage,
+        fullTotalPercentage,
+      };
+    }
+  );
+
+  return {
+    type: 'thread-functions',
+    threadHandle: threadHandleDisplay,
+    friendlyThreadName,
+    callTreeSummaryStrategy: threadSelectors.getCallTreeSummaryStrategy(state),
+    weightType: threadSelectors.getWeightTypeForCallTree(state),
+    totalFunctionCount,
+    filteredFunctionCount: filteredFunctions.length,
+    filters: filterOptions
+      ? {
+          searchString: filterOptions.searchString,
+          minSelf: filterOptions.minSelf,
+          limit: filterOptions.limit,
+        }
+      : undefined,
+    functions,
+  };
+}

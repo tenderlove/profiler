@@ -253,16 +253,17 @@ ErrorBoundary--report-error-to-developers-description =
 # This is used in a call to action button, displayed inside the error box.
 ErrorBoundary--report-error-on-github = Паведаміце пра памылку на GitHub
 
-## Footer Links
+## Settings Menu
+## The settings popup opened from the cog icon in the top bar.
 
-FooterLinks--legal = Прававыя звесткі
-FooterLinks--Privacy = Прыватнасць
-FooterLinks--Cookies = Кукі
-FooterLinks--languageSwitcher--select =
+SettingsMenu--button =
+    .title = Налады
+SettingsMenu--docs = Дакументацыя
+SettingsMenu--legal = Прававыя звесткі
+SettingsMenu--privacy = Прыватнасць
+SettingsMenu--cookies = Кукі
+SettingsMenu--language-switcher =
     .title = Змяніць мову
-FooterLinks--hide-button =
-    .title = Схаваць спасылкі ў ніжнім калонтытуле
-    .aria-label = Схаваць спасылкі ў ніжнім калонтытуле
 
 ## FullTimeline
 ## The timeline component of the full view in the analysis UI at the top of the
@@ -308,9 +309,6 @@ Home--record-instructions =
     Каб пачаць запіс профілю, націсніце кнопку запісу або выкарыстоўвайце 
     спалучэнне клавіш. Падчас запісу профілю значок стане сіняга колеру.
     Націсніце <kbd>Захапіць</kbd>, каб запампаваць даныя на profiler.firefox.com.
-Home--instructions-content =
-    Для запісу профіляў прадукцыйнасці патрабуецца <a>{ -firefox-brand-name }</a>.
-    Аднак існуючыя профілі можна праглядаць у любым сучасным браўзеры.
 Home--record-instructions-start-stop = Спыніцца і пачаць прафіляванне
 Home--record-instructions-capture-load = Захапіць і загрузіць профіль
 Home--profiler-motto = Захапіце профіль прадукцыйнасці. Прааналізуйце яго. Падзяліцеся ім. Зрабіце Інтэрнэт хутчэйшым.
@@ -318,6 +316,7 @@ Home--additional-content-title = Загрузіць існуючыя профі�
 Home--additional-content-content = Вы можаце <strong>перацягнуць</strong> файл профілю сюды, каб загрузіць яго, або:
 Home--compare-recordings-info = Вы таксама можаце параўнаць запісы. <a>Адкрыць інтэрфейс параўнання.</a>
 Home--your-recent-uploaded-recordings-title = Вашы нядаўна запампаваныя запісы
+Home--dark-mode-title = Цёмны рэжым
 # We replace the elements such as <perf> and <simpleperf> with links to the
 # documentation to use these tools.
 Home--load-files-from-other-tools2 =
@@ -334,12 +333,6 @@ Home--chrome-extension-recording-instructions =
     Пасля ўсталявання выкарыстоўвайце значок пашырэння
     на панэлі інструментаў або цэтлікі для запуску і спынення прафілявання.
     Вы таксама можаце экспартаваць профілі і загрузіць іх тут для аналізу.
-
-## IdleSearchField
-## The component that is used for all the search inputs in the application.
-
-IdleSearchField--search-input =
-    .placeholder = Увядзіце ўмовы фільтру
 
 ## JsTracerSettings
 ## JSTracer is an experimental feature and it's currently disabled. See Bug 1565788.
@@ -454,8 +447,8 @@ MarkerTable--details = Падрабязнасці
 # Variables:
 #   $filter (String) - Search string that will be used to filter the markers.
 MarkerTooltip--filter-button-tooltip =
-    .title = Паказваць толькі маркёры, якія адпавядаюць: “{ $filter }”
     .aria-label = Паказваць толькі маркёры, якія адпавядаюць: “{ $filter }”
+    .title = Паказваць толькі маркёры, якія адпавядаюць: “{ $filter }”
 
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
@@ -464,14 +457,9 @@ MenuButtons--index--metaInfo-button =
     .label = Даныя профілю
 MenuButtons--index--full-view = Поўны прагляд
 MenuButtons--index--cancel-upload = Скасаваць запампоўку
-MenuButtons--index--share-upload =
-    .label = Запампаваць лакальны профіль
-MenuButtons--index--share-re-upload =
-    .label = Паўторная запампаваць
 MenuButtons--index--share-error-uploading =
     .label = Памылка запампоўкі
 MenuButtons--index--revert = Вярнуцца да зыходнага профілю
-MenuButtons--index--docs = Дакументы
 MenuButtons--permalink--button =
     .label = Пастаянная спасылка
 
@@ -572,6 +560,8 @@ MenuButtons--metaInfo--buffer-duration-seconds =
 MenuButtons--metaInfo--buffer-duration-unlimited = Неабмежавана
 MenuButtons--metaInfo--application = Праграма
 MenuButtons--metaInfo--name-and-version = Назва і версія:
+# The time between application startup and when the profiler was started
+MenuButtons--metaInfo--application-uptime2 = Час працы:
 MenuButtons--metaInfo--update-channel = Канал абнаўлення:
 MenuButtons--metaInfo--build-id = ID зборкі:
 MenuButtons--metaInfo--build-type = Тып зборкі:
@@ -634,7 +624,6 @@ MenuButtons--publish--renderCheckbox-label-preference = Уключыць зна�
 MenuButtons--publish--renderCheckbox-label-private-browsing = Уключыць даныя з вокнаў прыватнага прагляду
 MenuButtons--publish--renderCheckbox-label-private-browsing-warning-image =
     .title = Гэты профіль змяшчае даныя прыватнага прагляду
-MenuButtons--publish--reupload-performance-profile = Паўторна запампаваць профіль прадукцыйнасці
 MenuButtons--publish--share-performance-profile = Абагуліць профіль прадукцыйнасці
 MenuButtons--publish--info-description = Запампуйце свой профіль і зрабіце яго даступным для ўсіх, хто мае спасылку.
 MenuButtons--publish--info-description-default = Тыпова вашы асабістыя даныя выдаляюцца.
@@ -645,7 +634,6 @@ MenuButtons--publish--upload-title = Запампоўванне профілю�
 MenuButtons--publish--cancel-upload = Скасаваць запампоўку
 MenuButtons--publish--message-something-went-wrong = Ой, нешта пайшло не так падчас загрузкі профілю.
 MenuButtons--publish--message-try-again = Паспрабаваць зноў
-MenuButtons--publish--download = Спампаваць
 MenuButtons--publish--compressing = Сцісканне…
 MenuButtons--publish--error-while-compressing = Памылка пры сцісканні, паспрабуйце зняць некаторыя птушкі, каб паменшыць памер профілю.
 
@@ -680,8 +668,8 @@ PanelSearch--search-field-hint = Вы ведаеце, што для пошуку
 ProfileName--edit-profile-name-button =
     .title = Змяніць назву профілю
 ProfileName--edit-profile-name-input =
-    .title = Змяніць назву профілю
     .aria-label = Назва профілю
+    .title = Змяніць назву профілю
 
 ## Profile Delete Button
 
@@ -759,8 +747,8 @@ ServiceWorkerManager--installed-button = Перазагрузіць прагра
 ServiceWorkerManager--updated-while-not-ready = Новая версія праграмы была прыменена да поўнай загрузкі гэтай старонкі. Вы можаце сутыкнуцца з няспраўнасцямі.
 ServiceWorkerManager--new-version-is-ready = Новая версія праграмы спампавана і гатова да выкарыстання.
 ServiceWorkerManager--hide-notice-button =
-    .title = Схаваць паведамленне аб перазагрузцы
     .aria-label = Схаваць паведамленне аб перазагрузцы
+    .title = Схаваць паведамленне аб перазагрузцы
 
 ## StackSettings
 ## This is the settings component that is used in Call Tree, Flame Graph and Stack
@@ -850,15 +838,6 @@ TrackNameButton--hide-track =
 TrackNameButton--hide-process =
     .title = Схаваць працэс
 
-## TrackMemoryGraph
-## This is used to show the memory graph of that process in the timeline part of
-## the UI. To learn more about it, visit:
-## https://profiler.firefox.com/docs/#/./memory-allocations?id=memory-track
-
-TrackMemoryGraph--relative-memory-at-this-time = адносная памяць на гэты момант
-TrackMemoryGraph--memory-range-in-graph = дыяпазон памяці ў графіку
-TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample = размеркаванні і вызваленні з моманту папярэдняга ўзору
-
 ## TrackPower
 ## This is used to show the power used by the CPU and other chips in a computer,
 ## graphed over time.
@@ -884,6 +863,11 @@ TrackPower--tooltip-power-watt = { $value } Вт
 #   $value (String) - the power value at this location
 TrackPower--tooltip-power-milliwatt = { $value } мВт
     .label = Магутнасць
+# This is used in the tooltip when the instant power value uses the microwatt unit.
+# Variables:
+#   $value (String) - the power value at this location
+TrackPower--tooltip-power-microwatt = { $value } мкВт
+    .label = Энэргія
 # This is used in the tooltip when the power value uses the kilowatt unit.
 # Variables:
 #   $value (String) - the power value at this location
@@ -1104,6 +1088,12 @@ BottomBox--assembly-code-not-available-title = Код асэмблера нед�
 # Elements:
 #   <a>link text</a> - A link to the github issue about supported scenarios.
 BottomBox--assembly-code-not-available-text = Глядзіце <a>абмеркаванне #4520</a> каб даведацца аб сцэнарыях, якія падтрымліваюцца, і запланаваных паляпшэннях.
+# The toggle button for making the bottom box fullscreen.
+BottomBox--hide-fullscreen =
+    .title = Выйсці з поўнага экрана
+# The toggle button for making the bottom box fullscreen.
+BottomBox--show-fullscreen =
+    .title = Увесь экран
 SourceView--close-button =
     .title = Закрыць акно з кодам
 
@@ -1178,6 +1168,17 @@ AssemblyView--show-button =
 # Assembly refers to the low-level programming language.
 AssemblyView--hide-button =
     .title = Схаваць прагляд асэмблера
+# The "◀" button above the assembly view.
+AssemblyView--prev-button =
+    .title = Назад
+# The "▶" button above the assembly view.
+AssemblyView--next-button =
+    .title = Далей
+# The label showing the current position and total count above the assembly view.
+# Variables:
+#   $current (Number) - The current position (1-indexed).
+#   $total (Number) - The total count.
+AssemblyView--position-label = { $current } з { $total }
 
 ## UploadedRecordingsHome
 ## This is the page that displays all the profiles that user has uploaded.

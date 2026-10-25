@@ -1,0 +1,636 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+import fs from 'fs';
+import path from 'path';
+import {
+  Command,
+  CommanderError,
+  InvalidArgumentError,
+  Option,
+} from 'commander';
+import { parse as parseToml } from 'smol-toml';
+import * as v from 'valibot';
+
+import { unserializeProfileOfArbitraryFormat } from 'firefox-profiler/profile-logic/process-profile';
+import { encodeProfileForFilename } from 'firefox-profiler/profile-logic/profile-file-encoding';
+import { computeCompactedProfile } from 'firefox-profiler/profile-logic/profile-compacting';
+import { GOOGLE_STORAGE_BUCKET } from 'firefox-profiler/app-logic/constants';
+import { insertStackLabels } from 'firefox-profiler/profile-logic/insert-stack-labels';
+import { SymbolStore } from 'firefox-profiler/profile-logic/symbol-store';
+import {
+  symbolicateProfile,
+  applySymbolicationSteps,
+} from 'firefox-profiler/profile-logic/symbolication';
+import type { SymbolicationStepInfo } from 'firefox-profiler/profile-logic/symbolication';
+import * as MozillaSymbolicationAPI from 'firefox-profiler/profile-logic/mozilla-symbolication-api';
+import {
+  applyWasmSymbolication,
+  type WasmSymbolicationSpec,
+} from 'firefox-profiler/profile-logic/wasm-symbolication';
+import { getThreadsWithMarkersMatchingSearchFilter } from 'firefox-profiler/profile-logic/marker-data';
+import { FuncFlag } from 'firefox-profiler/types/profile';
+import type {
+  Profile,
+  RawThread,
+  ThreadIndex,
+} from 'firefox-profiler/types/profile';
+import { assertExhaustiveCheck } from 'firefox-profiler/utils/types';
+import {
+  type AutoLabel,
+  type LabelDescription,
+  resolveAllLabels,
+} from 'firefox-profiler/utils/label-templates';
+import {
+  mergeNonOverlappingThreadsByName,
+  remapCountersAndProfilerOverhead,
+} from 'firefox-profiler/profile-logic/merge-compare';
+import {
+  attachSourcesFromFuncNames,
+  embedJsSources,
+  type SourceReader,
+} from 'firefox-profiler/profile-logic/embed-js-sources';
+import { runSourceMapSymbolicationNode } from 'firefox-profiler/profile-query/source-map';
+
+/**
+ * A CLI tool for editing profiles.
+ *
+ * To use it, first build:
+ *   yarn build-node-tools
+ *
+ * Then run:
+ *   node node-tools-dist/profiler-edit.js -i <profile> -o <output> [options]
+ *
+ * Examples:
+ *   node node-tools-dist/profiler-edit.js -i samply-profile.json -o out.json \
+ *     --symbolicate-with-server http://localhost:8001/abcdef/
+ *
+ *   node node-tools-dist/profiler-edit.js -i input.json.gz -o out.json.gz \
+ *     --symbolicate-wasm http://host/a.wasm=./a-unstripped.wasm \
+ *     --symbolicate-wasm http://host/b.wasm=./b-unstripped.wasm
+ *
+ *   node node-tools-dist/profiler-edit.js --from-hash w1spyw917hg... -o out.json.gz \
+ *     --insert-label-frames known-functions.toml
+ *
+ *   node node-tools-dist/profiler-edit.js -i big.json.gz -o small.json.gz \
+ *     --only-keep-threads-with-markers-matching '-async,-sync' \
+ *     --merge-non-overlapping-threads-by-name
+ *
+ *   node node-tools-dist/profiler-edit.js -i speedometer.json.gz -o out.json.gz \
+ *     --map-source-paths mapping.json
+ *
+ *   node node-tools-dist/profiler-edit.js -i samply-profile.json -o out.json.gz \
+ *     --js-sources-from-func-names --map-source-paths mapping.json
+ */
+
+export type ProfileSource =
+  | { type: 'FILE'; path: string }
+  | { type: 'URL'; url: string }
+  | { type: 'HASH'; hash: string };
+
+// Describes one --symbolicate-wasm argument: a local unstripped wasm file that
+// supplies symbol names, plus (optionally) the URL of the stripped wasm in the
+// profile to which those names should be applied. If `strippedWasmUrl` is
+// omitted, the profile must contain exactly one .wasm source, which is used.
+export interface WasmSymbolicationCliSpec {
+  // Path to the local unstripped .wasm file (with a "name" custom section).
+  unstrippedWasmPath: string;
+  // URL of the matching stripped wasm as it appears in the profile.
+  strippedWasmUrl?: string;
+}
+
+export interface CliOptions {
+  input: ProfileSource;
+  output: string;
+  symbolicateWithServer?: string;
+  symbolicateWasm: WasmSymbolicationCliSpec[];
+  mapSourcePaths?: string;
+  jsSourcesFromFuncNames?: boolean;
+  insertLabelFrames?: string;
+  onlyKeepThreadsWithMarkersMatching?: string;
+  mergeNonOverlappingThreadsByName?: boolean;
+  setName?: string;
+}
+
+export function loadWasmSymbolicationSpecs(
+  cliSpecs: WasmSymbolicationCliSpec[]
+): WasmSymbolicationSpec[] {
+  return cliSpecs.map((spec) => {
+    console.log(`Reading wasm symbols from ${spec.unstrippedWasmPath}`);
+    const buf = fs.readFileSync(spec.unstrippedWasmPath);
+    return {
+      bytes: new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+      url: spec.strippedWasmUrl,
+      label: spec.unstrippedWasmPath,
+    };
+  });
+}
+
+/**
+ * One entry of a --map-source-paths file. A file whose URL starts with
+ * `urlPrefix` is read from `localPath`, at the path that follows the prefix in
+ * the URL.
+ */
+export type SourcePathMapping = {
+  // Always ends with a slash.
+  urlPrefix: string;
+  // Absolute path of the directory that `urlPrefix` was served from.
+  localPath: string;
+};
+
+const SourcePathMappingFileSchema = v.object({
+  mappings: v.array(
+    v.object({
+      urlPrefix: v.pipe(
+        v.string(),
+        v.url(),
+        v.transform((urlPrefix) => {
+          const href = new URL(urlPrefix).href;
+          // Without the trailing slash, "/Speedometer3" would also match
+          // "/Speedometer3-other/".
+          return href.endsWith('/') ? href : href + '/';
+        })
+      ),
+      localPath: v.pipe(v.string(), v.nonEmpty('Expected a non-empty path')),
+    })
+  ),
+});
+
+/**
+ * Parse the contents of a --map-source-paths file, which looks like this:
+ *
+ * {
+ *   "mappings": [
+ *     { "urlPrefix": "http://127.0.0.1:62763/", "localPath": "/path/to/dir" },
+ *     { "urlPrefix": "http://127.0.0.1:62763/other/", "localPath": "/other" }
+ *   ]
+ * }
+ *
+ * Relative local paths are resolved against `baseDir`.
+ */
+export function parseSourcePathMappings(
+  jsonText: string,
+  baseDir: string
+): SourcePathMapping[] {
+  const result = v.safeParse(SourcePathMappingFileSchema, JSON.parse(jsonText));
+  if (!result.success) {
+    throw new Error(
+      `Invalid source path mapping file:\n${v.summarize(result.issues)}`
+    );
+  }
+  return result.output.mappings.map(({ urlPrefix, localPath }) => ({
+    urlPrefix,
+    localPath: path.resolve(baseDir, localPath),
+  }));
+}
+
+/**
+ * Find the mapping that covers this URL, and the decoded path of the file
+ * relative to the mapping's root.
+ */
+function resolveMappedPath(
+  mappings: SourcePathMapping[],
+  url: string
+): { mapping: SourcePathMapping; relativePath: string } | null {
+  let normalizedUrl: string;
+  try {
+    // This also resolves "." and ".." segments, so that the remaining path
+    // can't leave the mapped directory.
+    const parsedUrl = new URL(url);
+    parsedUrl.search = '';
+    parsedUrl.hash = '';
+    normalizedUrl = parsedUrl.href;
+  } catch {
+    return null;
+  }
+  for (const mapping of mappings) {
+    if (!normalizedUrl.startsWith(mapping.urlPrefix)) {
+      continue;
+    }
+    try {
+      return {
+        mapping,
+        relativePath: decodeURIComponent(
+          normalizedUrl.slice(mapping.urlPrefix.length)
+        ),
+      };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the files that the mappings cover from the local disk. URLs that no
+ * mapping covers resolve to null.
+ */
+export function createSourceReader(
+  mappings: SourcePathMapping[]
+): SourceReader {
+  // The most specific prefix wins, whatever the order in the file.
+  const sortedMappings = mappings
+    .slice()
+    .sort((a, b) => b.urlPrefix.length - a.urlPrefix.length);
+  return async (url) => {
+    const resolved = resolveMappedPath(sortedMappings, url);
+    if (resolved === null) {
+      return null;
+    }
+    const { mapping, relativePath } = resolved;
+    const filePath = path.resolve(mapping.localPath, relativePath);
+    // Profiles come from web content, so never read outside the mapped
+    // directory, even if the URL decoded to a ".." path.
+    if (!filePath.startsWith(mapping.localPath + path.sep)) {
+      return null;
+    }
+    try {
+      return await fs.promises.readFile(filePath, 'utf8');
+    } catch {
+      return null;
+    }
+  };
+}
+
+/**
+ * Reconstruct the func-name strings used by insertStackLabels' prefix matcher
+ * (mirrors getLabelIndexForFunc in insert-stack-labels.ts), so auto-discovery
+ * sees the same strings the labeler will compare against.
+ */
+export function collectFuncNames(profile: Profile): string[] {
+  const { funcTable, sources, stringArray } = profile.shared;
+  const result: string[] = [];
+  for (let i = 0; i < funcTable.length; i++) {
+    let name = stringArray[funcTable.name[i]];
+    if ((funcTable.flags[i] & FuncFlag.HasSource) !== 0) {
+      const sourceIndex = funcTable.source[i];
+      const filename = stringArray[sources.filename[sourceIndex]];
+      name += ` (${filename})`;
+    }
+    result.push(name);
+  }
+  return result;
+}
+
+export type ParsedLabelToml = {
+  labels: LabelDescription[];
+  autoLabels: AutoLabel[];
+};
+
+export function parseLabelToml(tomlText: string): ParsedLabelToml {
+  const data = parseToml(tomlText) as unknown as {
+    labels?: LabelDescription[];
+    auto_labels?: AutoLabel[];
+  };
+  return {
+    labels: data.labels ?? [],
+    autoLabels: data.auto_labels ?? [],
+  };
+}
+
+async function loadProfile(source: ProfileSource): Promise<Profile> {
+  switch (source.type) {
+    case 'FILE': {
+      console.log(`Loading profile from file ${source.path}`);
+      const bytes = fs.readFileSync(source.path, null);
+      const profile = await unserializeProfileOfArbitraryFormat(bytes);
+      if (profile === undefined) {
+        throw new Error('Unable to parse the profile.');
+      }
+      return profile;
+    }
+    case 'URL': {
+      console.log(`Loading profile from URL ${source.url}`);
+      const response = await fetch(source.url);
+      if (!response.ok) {
+        throw new Error(
+          `Unexpected response code: ${response.status} / ${response.statusText}`
+        );
+      }
+      const bytes = await response.arrayBuffer();
+      const profile = await unserializeProfileOfArbitraryFormat(
+        new Uint8Array(bytes)
+      );
+      if (profile === undefined) {
+        throw new Error('Unable to parse the profile.');
+      }
+      return profile;
+    }
+    case 'HASH': {
+      const url = `https://storage.googleapis.com/${GOOGLE_STORAGE_BUCKET}/${source.hash}`;
+      console.log(`Loading profile from hash ${source.hash}`);
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(
+          `Unexpected response code: ${response.status} / ${response.statusText}`
+        );
+      }
+      const bytes = await response.arrayBuffer();
+      const profile = await unserializeProfileOfArbitraryFormat(
+        new Uint8Array(bytes)
+      );
+      if (profile === undefined) {
+        throw new Error('Unable to parse the profile.');
+      }
+      return profile;
+    }
+    default:
+      throw assertExhaustiveCheck(source);
+  }
+}
+
+export async function run(options: CliOptions) {
+  let profile = await loadProfile(options.input);
+
+  if (options.symbolicateWithServer !== undefined) {
+    const server = options.symbolicateWithServer;
+    const symbolStore = new SymbolStore({
+      requestSymbolsFromServer: async (requests) => {
+        for (const { lib } of requests) {
+          console.log(`  Loading symbols for ${lib.debugName}`);
+        }
+        try {
+          return await MozillaSymbolicationAPI.requestSymbols(
+            'symbol server',
+            requests,
+            async (path, json) => {
+              const response = await fetch(server + path, {
+                body: json,
+                method: 'POST',
+              });
+              return response.json();
+            }
+          );
+        } catch (e) {
+          throw new Error(
+            `There was a problem with the symbolication API request to the symbol server: ${e.message}`
+          );
+        }
+      },
+      requestSymbolsFromBrowser: async () => [],
+      requestSymbolsViaSymbolTableFromBrowser: async () => {
+        throw new Error('Not supported in this context');
+      },
+    });
+
+    console.log('Symbolicating...');
+    const symbolicationSteps: SymbolicationStepInfo[] = [];
+    await symbolicateProfile(profile, symbolStore, (step) => {
+      symbolicationSteps.push(step);
+    });
+    console.log('Applying collected symbolication steps...');
+    const { shared, threads } = applySymbolicationSteps(
+      profile.threads,
+      profile.shared,
+      symbolicationSteps
+    );
+    profile.shared = shared;
+    profile.threads = threads;
+    profile.meta.symbolicated = true;
+  }
+
+  applyWasmSymbolication(
+    profile,
+    loadWasmSymbolicationSpecs(options.symbolicateWasm)
+  );
+
+  if (options.jsSourcesFromFuncNames) {
+    console.log('Finding the sources of JS functions in their names...');
+    attachSourcesFromFuncNames(profile);
+  }
+
+  if (options.mapSourcePaths !== undefined) {
+    console.log('Embedding sources from mapped paths...');
+    const mappings = parseSourcePathMappings(
+      fs.readFileSync(options.mapSourcePaths, 'utf8'),
+      path.dirname(options.mapSourcePaths)
+    );
+    await embedJsSources(
+      profile,
+      createSourceReader(mappings),
+      runSourceMapSymbolicationNode
+    );
+  }
+
+  if (options.insertLabelFrames !== undefined) {
+    console.log('Inserting label frames...');
+    const tomlText = fs.readFileSync(options.insertLabelFrames, 'utf8');
+    const parsed = parseLabelToml(tomlText);
+    const funcNames = collectFuncNames(profile);
+    const labels = resolveAllLabels(
+      parsed.autoLabels,
+      parsed.labels,
+      funcNames
+    );
+    profile = insertStackLabels(profile, labels);
+  }
+
+  if (
+    options.onlyKeepThreadsWithMarkersMatching !== undefined &&
+    options.onlyKeepThreadsWithMarkersMatching !== ''
+  ) {
+    const before = profile.threads.length;
+    const matchingThreadIndexes = getThreadsWithMarkersMatchingSearchFilter(
+      profile,
+      options.onlyKeepThreadsWithMarkersMatching
+    );
+    const oldThreadIndexToNew = new Map<ThreadIndex, ThreadIndex>();
+    const matchingThreads: RawThread[] = [];
+    profile.threads.forEach((thread, oldIndex) => {
+      if (matchingThreadIndexes.has(oldIndex)) {
+        oldThreadIndexToNew.set(oldIndex, matchingThreads.length);
+        matchingThreads.push(thread);
+      }
+    });
+    profile = {
+      ...profile,
+      threads: matchingThreads,
+      ...remapCountersAndProfilerOverhead(profile, oldThreadIndexToNew),
+    };
+    console.log(
+      `Kept ${profile.threads.length} of ${before} threads with markers matching ${JSON.stringify(options.onlyKeepThreadsWithMarkersMatching)}.`
+    );
+  }
+
+  if (options.mergeNonOverlappingThreadsByName) {
+    profile = mergeNonOverlappingThreadsByName(profile);
+  }
+
+  if (options.setName !== undefined) {
+    profile.meta.product = options.setName;
+  }
+
+  const { profile: compactedProfile } = computeCompactedProfile(profile);
+
+  const outputFilename = options.output;
+  console.log(`Saving profile to ${outputFilename}`);
+  const { bytes } = await encodeProfileForFilename(
+    compactedProfile,
+    outputFilename
+  );
+  fs.writeFileSync(outputFilename, bytes);
+  console.log('Finished.');
+}
+
+function collectWasm(
+  value: string,
+  previous: WasmSymbolicationCliSpec[]
+): WasmSymbolicationCliSpec[] {
+  // Accept "<url>=<path>" if the LHS looks like a URL, otherwise treat the
+  // whole string as a path and infer the URL from the profile. Split on
+  // the last `=` so URLs containing `=` (e.g. in query strings) survive
+  // intact; this assumes file paths don't contain `=`.
+  const eqIndex = value.lastIndexOf('=');
+  if (eqIndex !== -1 && /^[a-z]+:\/\//i.test(value.slice(0, eqIndex))) {
+    return [
+      ...previous,
+      {
+        strippedWasmUrl: value.slice(0, eqIndex),
+        unstrippedWasmPath: value.slice(eqIndex + 1),
+      },
+    ];
+  }
+  return [...previous, { unstrippedWasmPath: value }];
+}
+
+function requireNonEmpty(flagName: string): (value: string) => string {
+  return (value: string) => {
+    if (value === '') {
+      throw new InvalidArgumentError(`${flagName} requires a non-empty value`);
+    }
+    return value;
+  };
+}
+
+export function makeOptionsFromArgv(processArgv: string[]): CliOptions {
+  const program = new Command();
+  program
+    .name('profiler-edit')
+    .description('Edit and transform Firefox performance profiles')
+    .exitOverride()
+    .option(
+      '-i, --input <fileOrUrl>',
+      'Input profile (file path or http(s) URL)'
+    )
+    .option('-o, --output <path>', 'Output path (.json or .json.gz)')
+    .option('--from-file <path>', 'Load input from a file')
+    .option('--from-url <url>', 'Load input from a URL')
+    .option('--from-hash <hash>', 'Load input from a profile hash')
+    .option(
+      '--symbolicate-with-server <url>',
+      'Symbolicate frames using this symbol server URL'
+    )
+    .addOption(
+      new Option(
+        '--symbolicate-wasm <spec>',
+        'Apply wasm symbol info, as <url>=<path> or just <path>'
+      )
+        .argParser(collectWasm)
+        .default([] as WasmSymbolicationCliSpec[])
+    )
+    .option(
+      '--map-source-paths <path>',
+      'JSON file mapping JS source URLs to local directories, to embed the sources and apply their source maps'
+    )
+    .option(
+      '--js-sources-from-func-names',
+      'Give JS functions the source in their name, like "foo (url:line:column)", if no JS function has a source'
+    )
+    .option('--insert-label-frames <path>', 'TOML file with label definitions')
+    .option(
+      '--only-keep-threads-with-markers-matching <search>',
+      'Keep only threads with markers matching the given search string'
+    )
+    .option(
+      '--merge-non-overlapping-threads-by-name',
+      'Merge same-named threads across non-overlapping process runs'
+    )
+    .option(
+      '--set-name <name>',
+      'Override the profile product name',
+      requireNonEmpty('--set-name')
+    );
+
+  program.parse(processArgv);
+  const opts = program.opts();
+
+  const sources: ProfileSource[] = [];
+  if (typeof opts.input === 'string' && opts.input !== '') {
+    if (/^https?:\/\//i.test(opts.input)) {
+      sources.push({ type: 'URL', url: opts.input });
+    } else {
+      sources.push({ type: 'FILE', path: opts.input });
+    }
+  }
+  if (typeof opts.fromFile === 'string' && opts.fromFile !== '') {
+    sources.push({ type: 'FILE', path: opts.fromFile });
+  }
+  if (typeof opts.fromUrl === 'string' && opts.fromUrl !== '') {
+    sources.push({ type: 'URL', url: opts.fromUrl });
+  }
+  if (typeof opts.fromHash === 'string' && opts.fromHash !== '') {
+    sources.push({ type: 'HASH', hash: opts.fromHash });
+  }
+
+  if (sources.length === 0) {
+    throw new Error(
+      'An input must be supplied: use -i <FILE_OR_URL>, --from-file <path>, --from-url <url>, or --from-hash <hash>'
+    );
+  }
+  if (sources.length > 1) {
+    throw new Error(
+      'Only one input may be supplied (-i, --from-file, --from-url, --from-hash)'
+    );
+  }
+
+  if (!(typeof opts.output === 'string' && opts.output !== '')) {
+    throw new Error('An output path must be supplied with --output / -o');
+  }
+
+  return {
+    input: sources[0],
+    output: opts.output,
+    symbolicateWithServer:
+      typeof opts.symbolicateWithServer === 'string' &&
+      opts.symbolicateWithServer !== ''
+        ? opts.symbolicateWithServer
+        : undefined,
+    symbolicateWasm: opts.symbolicateWasm,
+    mapSourcePaths:
+      typeof opts.mapSourcePaths === 'string' && opts.mapSourcePaths !== ''
+        ? opts.mapSourcePaths
+        : undefined,
+    jsSourcesFromFuncNames: opts.jsSourcesFromFuncNames === true,
+    insertLabelFrames:
+      typeof opts.insertLabelFrames === 'string' &&
+      opts.insertLabelFrames !== ''
+        ? opts.insertLabelFrames
+        : undefined,
+    onlyKeepThreadsWithMarkersMatching:
+      typeof opts.onlyKeepThreadsWithMarkersMatching === 'string' &&
+      opts.onlyKeepThreadsWithMarkersMatching !== ''
+        ? opts.onlyKeepThreadsWithMarkersMatching
+        : undefined,
+    mergeNonOverlappingThreadsByName:
+      opts.mergeNonOverlappingThreadsByName === true,
+    setName: typeof opts.setName === 'string' ? opts.setName : undefined,
+  };
+}
+
+if (require.main === module) {
+  try {
+    const options = makeOptionsFromArgv(process.argv);
+    run(options).catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+  } catch (err) {
+    if (err instanceof CommanderError) {
+      // Commander already wrote its own output and chose the
+      // appropriate exit code.
+      process.exit(err.exitCode);
+    }
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+}

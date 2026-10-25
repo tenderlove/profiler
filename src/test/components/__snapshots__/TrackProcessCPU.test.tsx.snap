@@ -2,25 +2,25 @@
 
 exports[`TrackProcessCPU draws a dot that matches the snapshot 1`] = `
 <div
-  class="timelineTrackProcessCPUGraphDot"
-  style="left: 15px; top: 18.6px;"
+  class="timelineTrackCounterGraphDot"
+  style="left: 15px; top: 18.6px; background-color: rgb(74, 74, 79);"
 />
 `;
 
 exports[`TrackProcessCPU has a tooltip that matches the snapshot 1`] = `
 <div
-  class="timelineTrackProcessCPUTooltip"
+  class="timelineTrackCounterTooltip"
 >
   <div
-    class="timelineTrackProcessCPUTooltipLine"
+    class="tooltipDetails"
   >
-    CPU:
-     
-    <span
-      class="timelineTrackProcessCPUTooltipNumber"
+    <div
+      class="tooltipLabel"
     >
-      50%
-    </span>
+      CPU
+      :
+    </div>
+    50%
   </div>
 </div>
 `;
@@ -56,7 +56,7 @@ Array [
   Array [
     "moveTo",
     0,
-    24,
+    26,
   ],
   Array [
     "lineTo",
@@ -119,20 +119,30 @@ Array [
 
 exports[`TrackProcessCPU matches the component snapshot 1`] = `
 <div
-  class="timelineTrackProcessCPU"
-  style="height: 25px; --graph-height: 25px;"
+  class="timelineTrackCounter"
+  style="--graph-height: 25px; --markers-height: 15px;"
 >
   <div
-    class="timelineTrackProcessCPUGraph"
+    style="display: contents;"
   >
-    <canvas
-      class="timelineTrackProcessCPUCanvas"
-      height="25"
-      width="80"
-    />
     <div
-      class="timelineEmptyThreadIndicator"
-    />
+      class="timelineTrackCounterGraph"
+    >
+      <div>
+        <canvas
+          class="timelineTrackCounterCanvas"
+          height="25"
+          width="80"
+        />
+      </div>
+      <div
+        style="display: contents;"
+      >
+        <div
+          class="timelineEmptyThreadIndicator"
+        />
+      </div>
+    </div>
   </div>
 </div>
 `;

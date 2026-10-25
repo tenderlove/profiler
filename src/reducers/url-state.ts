@@ -27,6 +27,7 @@ import type {
 } from 'firefox-profiler/types';
 
 import type { TabSlug } from '../app-logic/tabs-handling';
+import type { SingleColumnSortState } from '../components/shared/TreeView';
 import { translateThreadsKey } from 'firefox-profiler/profile-logic/profile-data';
 import { translateTransformStack } from 'firefox-profiler/profile-logic/transforms';
 
@@ -193,6 +194,18 @@ const markersSearchString: Reducer<string> = (state = '', action) => {
   }
 };
 
+const markerTableSort: Reducer<SingleColumnSortState[] | null> = (
+  state = null,
+  action
+) => {
+  switch (action.type) {
+    case 'CHANGE_MARKER_TABLE_SORT':
+      return action.sort;
+    default:
+      return state;
+  }
+};
+
 const networkSearchString: Reducer<string> = (state = '', action) => {
   switch (action.type) {
     case 'CHANGE_NETWORK_SEARCH_STRING':
@@ -303,10 +316,30 @@ const lastSelectedCallTreeSummaryStrategy: Reducer<CallTreeSummaryStrategy> = (
   }
 };
 
-const invertCallstack: Reducer<boolean> = (state = false, action) => {
+const invertCallTree: Reducer<boolean> = (state = false, action) => {
   switch (action.type) {
     case 'CHANGE_INVERT_CALLSTACK':
-      return action.invertCallstack;
+      return action.selectedTab === 'calltree' ? action.invertCallstack : state;
+    default:
+      return state;
+  }
+};
+
+const invertFlameGraph: Reducer<boolean> = (state = false, action) => {
+  switch (action.type) {
+    case 'CHANGE_INVERT_CALLSTACK':
+      return action.selectedTab === 'flame-graph'
+        ? action.invertCallstack
+        : state;
+    default:
+      return state;
+  }
+};
+
+const includeIdleSamples: Reducer<boolean> = (state = true, action) => {
+  switch (action.type) {
+    case 'CHANGE_INCLUDE_IDLE_SAMPLES':
+      return action.includeIdleSamples;
     default:
       return state;
   }
@@ -353,9 +386,10 @@ const globalTrackOrder: Reducer<TrackIndex[]> = (state = [], action) => {
     case 'CHANGE_TAB_FILTER':
       return action.globalTrackOrder;
     case 'SANITIZED_PROFILE_PUBLISHED':
-      // If some threads were removed, do not even attempt to figure this out. It's
-      // complicated, and not many people use this feature.
-      return action.translationMaps?.oldThreadIndexToNew ? [] : state;
+      // The action carries a track order in the post-sanitization track-index
+      // space when sanitization re-indexed tracks; otherwise it is null and
+      // the existing state remains valid.
+      return action.globalTrackOrder ?? state;
     default:
       return state;
   }
@@ -402,9 +436,10 @@ const hiddenGlobalTracks: Reducer<Set<TrackIndex>> = (
       return hiddenGlobalTracks;
     }
     case 'SANITIZED_PROFILE_PUBLISHED':
-      // If any threads were removed, this was because they were hidden.
-      // Reset this state.
-      return action.translationMaps?.oldThreadIndexToNew ? new Set() : state;
+      // The action carries the hidden-track set in the post-sanitization
+      // track-index space when sanitization re-indexed tracks; otherwise it
+      // is null and the existing state remains valid.
+      return action.hiddenGlobalTracks ?? state;
     default:
       return state;
   }
@@ -488,8 +523,10 @@ const hiddenLocalTracksByPid: Reducer<Map<Pid, Set<TrackIndex>>> = (
       return hiddenLocalTracksByPid;
     }
     case 'SANITIZED_PROFILE_PUBLISHED':
-      // If any threads were removed then this information is no longer valid.
-      return action.translationMaps?.oldThreadIndexToNew ? new Map() : state;
+      // The action carries the hidden-local-track map in the post-
+      // sanitization track-index space when sanitization re-indexed tracks;
+      // otherwise it is null and the existing state remains valid.
+      return action.hiddenLocalTracksByPid ?? state;
     default:
       return state;
   }
@@ -511,9 +548,10 @@ const localTrackOrderByPid: Reducer<Map<Pid, TrackIndex[]>> = (
       return localTrackOrderByPid;
     }
     case 'SANITIZED_PROFILE_PUBLISHED':
-      // If any threads were removed then remove this information. It's complicated
-      // to compute, and not many people use it.
-      return action.translationMaps?.oldThreadIndexToNew ? new Map() : state;
+      // The action carries the local-track order map in the post-sanitization
+      // track-index space when sanitization re-indexed tracks; otherwise it
+      // is null and the existing state remains valid.
+      return action.localTrackOrderByPid ?? state;
     default:
       return state;
   }
@@ -529,10 +567,18 @@ const localTrackOrderChangedPids: Reducer<Set<Pid>> = (
       localTrackOrderChangedPids.add(action.pid);
       return localTrackOrderChangedPids;
     }
-    case 'SANITIZED_PROFILE_PUBLISHED':
-      // In localTrackOrderByPid above the state is reset in this case,
-      // let's reset it here as well.
-      return action.translationMaps?.oldThreadIndexToNew ? new Set() : state;
+    case 'SANITIZED_PROFILE_PUBLISHED': {
+      // Drop pids that no longer have a local track order in the sanitized
+      // profile. When sanitization didn't re-index any tracks, the action's
+      // localTrackOrderByPid is null and the existing set remains valid.
+      const newLocalTrackOrderByPid = action.localTrackOrderByPid;
+      if (newLocalTrackOrderByPid === null) {
+        return state;
+      }
+      return new Set(
+        [...state].filter((pid) => newLocalTrackOrderByPid.has(pid))
+      );
+    }
     default:
       return state;
   }
@@ -582,7 +628,6 @@ const profileName: Reducer<string | null> = (state = null, action) => {
 const sourceView: Reducer<SourceViewState> = (
   state = {
     scrollGeneration: 0,
-    libIndex: null,
     sourceIndex: null,
     highlightedLine: null,
   },
@@ -595,7 +640,6 @@ const sourceView: Reducer<SourceViewState> = (
         scrollGeneration: shouldScroll
           ? state.scrollGeneration + 1
           : state.scrollGeneration,
-        libIndex: action.libIndex,
         sourceIndex: action.sourceIndex,
         scrollToLineNumber: action.scrollToLineNumber,
         highlightedLine: action.highlightedLineNumber,
@@ -707,6 +751,16 @@ const isBottomBoxOpenPerPanel: Reducer<IsOpenPerPanelState> = (
   }
 };
 
+const isBottomBoxFullscreen: Reducer<boolean> = (state = false, action) => {
+  switch (action.type) {
+    case 'TOGGLE_BOTTOM_BOX_FULLSCREEN': {
+      return !state;
+    }
+    default:
+      return state;
+  }
+};
+
 /**
  * This value is only set from the URL and never changed.
  */
@@ -739,7 +793,9 @@ const profileSpecific = combineReducers({
   selectedThreads,
   implementation,
   lastSelectedCallTreeSummaryStrategy,
-  invertCallstack,
+  invertCallTree,
+  invertFlameGraph,
+  includeIdleSamples,
   showUserTimings,
   stackChartSameWidths,
   committedRanges,
@@ -750,6 +806,7 @@ const profileSpecific = combineReducers({
   sourceView,
   assemblyView,
   isBottomBoxOpenPerPanel,
+  isBottomBoxFullscreen,
   timelineType,
   globalTrackOrder,
   hiddenGlobalTracks,
@@ -759,6 +816,7 @@ const profileSpecific = combineReducers({
   showJsTracerSummary,
   tabFilter,
   selectedMarkers,
+  markerTableSort,
   // The timeline tracks used to be hidden and sorted by thread indexes, rather than
   // track indexes. The only way to migrate this information to tracks-based data is to
   // first retrieve the profile, so they can't be upgraded by the normal url upgrading

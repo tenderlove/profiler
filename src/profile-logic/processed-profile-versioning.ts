@@ -14,10 +14,11 @@
  */
 
 import { sortDataTable } from '../utils/data-table-utils';
-import { resourceTypes } from './data-structures';
+import { ResourceType } from 'firefox-profiler/types';
 import { StringTable } from '../utils/string-table';
 import { timeCode } from '../utils/time-code';
 import { PROCESSED_PROFILE_VERSION } from '../app-logic/constants';
+import { ProfileVersionError } from './errors';
 import type { Profile } from 'firefox-profiler/types';
 
 export type ProfileUpgradeInfo = {
@@ -85,10 +86,10 @@ export function attemptToUpgradeProcessedProfileThroughMutation(
   }
 
   if (profileVersion > PROCESSED_PROFILE_VERSION) {
-    throw new Error(
-      `Unable to parse a processed profile of version ${profileVersion}, most likely profiler.firefox.com needs to be refreshed. ` +
-        `The most recent version understood by this version of profiler.firefox.com is version ${PROCESSED_PROFILE_VERSION}.\n` +
-        'You can try refreshing this page in case profiler.firefox.com has updated in the meantime.'
+    throw new ProfileVersionError(
+      'processed',
+      profileVersion,
+      PROCESSED_PROFILE_VERSION
     );
   }
 
@@ -356,19 +357,19 @@ const _upgraders: {
       };
       function addLibResource(name: number, lib: number) {
         const index = newResourceTable.length++;
-        newResourceTable.type[index] = resourceTypes.library;
+        newResourceTable.type[index] = ResourceType.Library;
         newResourceTable.name[index] = name;
         newResourceTable.lib[index] = lib;
       }
       function addWebhostResource(origin: number, host: number) {
         const index = newResourceTable.length++;
-        newResourceTable.type[index] = resourceTypes.webhost;
+        newResourceTable.type[index] = ResourceType.Webhost;
         newResourceTable.name[index] = origin;
         newResourceTable.host[index] = host;
       }
       function addUrlResource(url: number) {
         const index = newResourceTable.length++;
-        newResourceTable.type[index] = resourceTypes.url;
+        newResourceTable.type[index] = ResourceType.Url;
         newResourceTable.name[index] = url;
       }
       const oldResourceToNewResourceMap = new Map();
@@ -378,7 +379,7 @@ const _upgraders: {
         resourceIndex < resourceTable.length;
         resourceIndex++
       ) {
-        if (resourceTable.type[resourceIndex] === resourceTypes.library) {
+        if (resourceTable.type[resourceIndex] === ResourceType.Library) {
           oldResourceToNewResourceMap.set(
             resourceIndex,
             newResourceTable.length
@@ -387,7 +388,7 @@ const _upgraders: {
             resourceTable.name[resourceIndex],
             resourceTable.lib[resourceIndex]
           );
-        } else if (resourceTable.type[resourceIndex] === resourceTypes.url) {
+        } else if (resourceTable.type[resourceIndex] === ResourceType.Url) {
           const scriptURI = stringTable.getString(
             resourceTable.name[resourceIndex]
           );
@@ -1810,7 +1811,7 @@ const _upgraders: {
           continue;
         }
         const resourceType = resourceTable.type[resourceIndex];
-        if (resourceType !== resourceTypes.library) {
+        if (resourceType !== ResourceType.Library) {
           continue;
         }
         const libIndex = resourceTable.lib[resourceIndex];
@@ -2663,7 +2664,7 @@ const _upgraders: {
     // Create the sources table
     const sourceTable = {
       length: 0,
-      uuid: [] as Array<string | null>,
+      id: [] as Array<string | null>,
       filename: [] as Array<number>,
     };
 
@@ -2690,7 +2691,7 @@ const _upgraders: {
           if (sourceIndex === undefined) {
             // Add new entry to sources table
             sourceIndex = sourceTable.length;
-            sourceTable.uuid.push(null);
+            sourceTable.id.push(null);
             sourceTable.filename.push(fileNameIndex);
             sourceTable.length++;
             fileNameIndexToSourceIndex.set(fileNameIndex, sourceIndex);
@@ -3028,6 +3029,776 @@ const _upgraders: {
     profile.shared.resourceTable = newResourceTable;
     profile.shared.nativeSymbols = newNativeSymbols;
     upgradeInfo.v60 = { threadMappings, newFuncCount: newFuncTable.length };
+  },
+
+  [61]: (profile: any) => {
+    // The source table schema was updated:
+    // - The "uuid" field was renamed to "id". Profiles stored at v58-60 before
+    //   this rename may still have the old "uuid" field name.
+    // - startLine and startColumn were added, defaulting to 1 as they are 1-based.
+    // - sourceMapURL was added, defaulting to null.
+    const sources = profile.shared && profile.shared.sources;
+    if (sources) {
+      if (sources.uuid !== undefined && sources.id === undefined) {
+        sources.id = sources.uuid;
+        delete sources.uuid;
+      }
+      const length = sources.length;
+      sources.startLine = new Array(length).fill(1);
+      sources.startColumn = new Array(length).fill(1);
+      sources.sourceMapURL = new Array(length).fill(null);
+    }
+  },
+
+  [62]: (profile: any) => {
+    // Added CounterDisplayConfig to counters. This metadata controls how a
+    // counter is rendered (graph type, color, unit, etc.).
+    // Derive defaults from the counter's category and name.
+    if (profile.counters) {
+      for (const counter of profile.counters) {
+        if (counter.display !== undefined) {
+          continue;
+        }
+        const { category, name } = counter;
+        if (category === 'Bandwidth') {
+          counter.display = {
+            graphType: 'line-rate',
+            unit: 'bytes',
+            color: counter.color ?? 'blue',
+            markerSchemaLocation: null,
+            sortWeight: 10,
+            label: 'Bandwidth',
+          };
+        } else if (category === 'Memory') {
+          counter.display = {
+            graphType: 'line-accumulated',
+            unit: 'bytes',
+            color: counter.color ?? 'orange',
+            markerSchemaLocation: 'timeline-memory',
+            sortWeight: 20,
+            label: 'Memory',
+          };
+        } else if (category === 'power') {
+          counter.display = {
+            graphType: 'line-rate',
+            unit: 'pWh',
+            color: counter.color ?? 'grey',
+            markerSchemaLocation: null,
+            sortWeight: 30,
+            label: name,
+          };
+        } else if (category === 'CPU' && name === 'processCPU') {
+          counter.display = {
+            graphType: 'line-rate',
+            unit: 'percent',
+            color: counter.color ?? 'grey',
+            markerSchemaLocation: null,
+            sortWeight: 40,
+            label: 'Process CPU',
+          };
+        } else {
+          counter.display = {
+            graphType: 'line-rate',
+            unit: '',
+            color: counter.color ?? 'grey',
+            markerSchemaLocation: null,
+            sortWeight: 50,
+            label: name,
+          };
+        }
+        delete counter.color;
+      }
+    }
+  },
+  [63]: (profile: any) => {
+    // Added tooltipRows to CounterDisplayConfig. This metadata describes the
+    // rows of the counter's hover tooltip (data source, value format, label).
+    // Derive defaults from the counter's category and name.
+    if (!profile.counters) {
+      return;
+    }
+    for (const counter of profile.counters) {
+      if (!counter.display || counter.display.tooltipRows !== undefined) {
+        continue;
+      }
+      const { category, name } = counter;
+      if (category === 'Bandwidth') {
+        counter.display.tooltipRows = [
+          {
+            type: 'value',
+            source: 'rate',
+            format: { unit: 'bytes-per-second', co2: 'per-byte' },
+            label: 'Transfer speed for this sample',
+            labelKey: 'bandwidth-speed',
+          },
+          {
+            type: 'value',
+            source: 'sample-number',
+            format: { unit: 'number' },
+            label: 'read/write operations since the previous sample',
+            labelKey: 'bandwidth-operations',
+          },
+          { type: 'separator' },
+          {
+            type: 'value',
+            source: 'accumulated',
+            format: { unit: 'bytes', co2: 'per-byte' },
+            label: 'Data transferred up to this time',
+            labelKey: 'bandwidth-cumulative',
+          },
+          {
+            type: 'value',
+            source: 'count-range',
+            format: { unit: 'bytes', co2: 'per-byte' },
+            label: 'Data transferred in the visible range',
+            labelKey: 'bandwidth-total-graph',
+          },
+          {
+            type: 'value',
+            source: 'selection-total',
+            format: { unit: 'bytes', co2: 'per-byte' },
+            label: 'Data transferred in the current selection',
+            labelKey: 'bandwidth-total-selection',
+            requiresPreviewSelection: true,
+          },
+        ];
+      } else if (category === 'Memory') {
+        counter.display.tooltipRows = [
+          {
+            type: 'value',
+            source: 'accumulated',
+            format: { unit: 'bytes' },
+            label: 'relative memory at this time',
+            labelKey: 'memory-relative',
+          },
+          {
+            type: 'value',
+            source: 'count-range',
+            format: { unit: 'bytes' },
+            label: 'memory range in graph',
+            labelKey: 'memory-range',
+          },
+          {
+            type: 'value',
+            source: 'sample-number',
+            format: { unit: 'number' },
+            label: 'allocations and deallocations since the previous sample',
+            labelKey: 'memory-operations',
+          },
+        ];
+      } else if (category === 'power') {
+        counter.display.tooltipRows = [
+          {
+            type: 'value',
+            source: 'count',
+            format: { unit: 'number', co2: 'per-watthour', scale: 'power' },
+            label: 'Power',
+            labelKey: 'power',
+          },
+          {
+            type: 'value',
+            source: 'selection-total',
+            format: { unit: 'number', co2: 'per-watthour', scale: 'energy' },
+            label: 'Energy used in the current selection',
+            labelKey: 'power-energy-preview',
+            requiresPreviewSelection: true,
+          },
+          {
+            type: 'value',
+            source: 'selection-rate',
+            format: { unit: 'number', co2: 'per-watthour', scale: 'power' },
+            label: 'Average power in the current selection',
+            labelKey: 'power-average-preview',
+            requiresPreviewSelection: true,
+          },
+          {
+            type: 'value',
+            source: 'committed-range-total',
+            format: { unit: 'number', co2: 'per-watthour', scale: 'energy' },
+            label: 'Energy used in the visible range',
+            labelKey: 'power-energy-range',
+          },
+        ];
+      } else if (category === 'CPU' && name === 'processCPU') {
+        counter.display.tooltipRows = [
+          {
+            type: 'value',
+            source: 'cpu-ratio',
+            format: { unit: 'percent' },
+            label: 'CPU',
+            labelKey: 'cpu',
+          },
+        ];
+      } else {
+        counter.display.tooltipRows = [
+          {
+            type: 'value',
+            source: 'count',
+            format: { unit: 'number' },
+            label: name,
+          },
+        ];
+      }
+    }
+  },
+  [64]: (profile: any) => {
+    // Add the sourceLocationTable on profile.shared and the matching
+    // originalLocation column on funcTable and frameTable. Also add the content
+    // column on the sources table.
+    const { funcTable, frameTable, sources } = profile.shared;
+    funcTable.originalLocation = new Array(funcTable.length).fill(null);
+    frameTable.originalLocation = new Array(frameTable.length).fill(null);
+    profile.shared.sourceLocationTable = {
+      source: [],
+      line: [],
+      column: [],
+      length: 0,
+    };
+    sources.content = new Array(sources.length).fill(null);
+  },
+  [65]: (_profile: any) => {
+    // The type of `profile.shared.stackTable.frame` was changed from
+    // `IndexIntoFrameTable[]` to `IndexIntoFrameTable[] | Int32Array<ArrayBuffer>`.
+    // All valid v64 profiles are valid v65 profiles, so no upgrader is needed.
+  },
+  [66]: (profile: any) => {
+    // The profile.shared.stackTable.prefix column was replaced with a prefixOffset
+    // column. For each stack i, prefixOffset[i] is 0 if i is a root, otherwise
+    // it is i's offset from its parent (parent index = i - prefixOffset[i]).
+    const { stackTable } = profile.shared;
+    const { prefix } = stackTable;
+    const len = prefix.length;
+    const prefixOffset = new Array<number>(len);
+    for (let i = 0; i < len; i++) {
+      const p = prefix[i];
+      prefixOffset[i] = p === null ? 0 : i - p;
+    }
+    stackTable.prefixOffset = prefixOffset;
+    delete stackTable.prefix;
+  },
+  [67]: (_profile: any) => {
+    // Various raw columns can now optionally be stored as typed arrays:
+    //  - `thread.samples.time` / `timeDeltas` (`Float64Array`)
+    //  - `counter.samples.time` / `timeDeltas` (`Float64Array`)
+    //  - `thread.jsAllocations.time` (`Float64Array`)
+    //  - `thread.nativeAllocations.time` (`Float64Array`)
+    //  - `profile.shared.frameTable.func` (`Int32Array`)
+    //  - `profile.shared.frameTable.address` (`Int32Array`, `-1` sentinel)
+    //  - `profile.shared.frameTable.inlineDepth` (`Uint8Array`)
+    // Regular JS / JSON arrays are still accepted. All valid v66 profiles
+    // are valid v67 profiles, so no upgrader is needed.
+  },
+  [68]: (_profile: any) => {
+    // The `startTime` and `endTime` columns of the raw marker table
+    // (`thread.markers`) can now optionally be stored as `Float64Array`.
+    // Each marker's `phase` determines which of the two is meaningful, so
+    // slots that would otherwise be `null` may carry a placeholder value
+    // (typically `0`); those slots are never read. Regular JS / JSON arrays
+    // are still accepted. All valid v67 profiles are valid v68 profiles, so
+    // no upgrader is needed.
+  },
+  [69]: (profile: any) => {
+    // A new marker schema display location, "timeline-network", was added.
+    // Add it to any "Network" marker schema already present in the profile.
+    for (const schema of profile.meta.markerSchema ?? []) {
+      if (
+        schema.name === 'Network' &&
+        schema.display &&
+        !schema.display.includes('timeline-network')
+      ) {
+        schema.display.push('timeline-network');
+      }
+    }
+  },
+  [70]: (profile: any) => {
+    // The `lib` column moved off the resourceTable and onto the frameTable, so
+    // that resources and libraries can vary independently: multiple libs can
+    // now share one resource.
+    //
+    // Before: frame -> func -> resource -> lib
+    // After:  frame -> lib
+    // Frames with no library use the sentinel value -1.
+    const { frameTable, funcTable, resourceTable } = profile.shared;
+    const libForFunc = new Int32Array(funcTable.length).fill(-1);
+    for (let funcIndex = 0; funcIndex < funcTable.length; funcIndex++) {
+      const resourceIndex = funcTable.resource[funcIndex];
+      if (resourceIndex !== -1) {
+        libForFunc[funcIndex] = resourceTable.lib[resourceIndex] ?? -1;
+      }
+    }
+    const lib = new Array(frameTable.length).fill(-1);
+    for (let frameIndex = 0; frameIndex < frameTable.length; frameIndex++) {
+      lib[frameIndex] = libForFunc[frameTable.func[frameIndex]];
+    }
+    frameTable.lib = lib;
+    delete resourceTable.lib;
+  },
+  [71]: (profile: any) => {
+    // The frame table representation changed:
+    //  - A new `flags` bitfield column was added (Uint8Array or plain array).
+    //  - The `inlineDepth` column was removed; the `IsInlined` flag carries
+    //    the boolean "was this frame an inlined call" information.
+    //  - The `category`, `subcategory`, `lib`, `nativeSymbol`, `line`,
+    //    `column` and `originalLocation` columns are no longer nullable
+    //    in-band. When the corresponding "Has..." flag is not set, the value
+    //    in the column is ignored and can be any placeholder (we write 0).
+    //  - The `address` column's `-1` sentinel was likewise replaced by the
+    //    `HasAddress` flag, so the column is now unsigned (`Uint32Array`).
+    //  - `address` and `lib` share the single `HasAddress` flag, because an
+    //    address is only meaningful relative to a library. A v70 profile could
+    //    have a lib without an address (the lib was derived from the func's
+    //    resource, which exists for frames that arrived pre-symbolicated as
+    //    "func (in libname)"). Those frames lose their frame-level lib here;
+    //    the library name is still reachable via the func's resource. An
+    //    address without a lib can't be symbolicated, so such frames lose
+    //    their address.
+    //  - `innerWindowID` is no longer nullable either, but it has no flag: it
+    //    already used `0` to mean "no innerWindowID", so `null` becomes `0`.
+
+    // A snapshot of the `FrameFlag` enum as of version 71. Don't refer to the
+    // current `FrameFlag` enum here; upgraders must keep working even if later
+    // versions renumber or remove flags.
+    const IsInlined = 1 << 0;
+    const HasAddress = 1 << 1;
+    const HasCategory = 1 << 2;
+    const HasNativeSymbol = 1 << 3;
+    const HasLine = 1 << 4;
+    const HasColumn = 1 << 5;
+    const HasOriginalLocation = 1 << 6;
+
+    const { frameTable } = profile.shared;
+    const {
+      inlineDepth,
+      address,
+      category,
+      subcategory,
+      lib,
+      nativeSymbol,
+      innerWindowID,
+      line,
+      column,
+      originalLocation,
+      length,
+    } = frameTable;
+    const flags = new Array<number>(length);
+    for (let i = 0; i < length; i++) {
+      let f = 0;
+      if (inlineDepth[i] > 0) {
+        f |= IsInlined;
+      }
+      if (address[i] !== -1 && lib[i] !== -1) {
+        f |= HasAddress;
+      } else {
+        address[i] = 0;
+        lib[i] = 0;
+      }
+      if (category[i] !== null) {
+        f |= HasCategory;
+      } else {
+        category[i] = 0;
+        // Ignored when HasCategory is unset, but v70 allowed it to be null.
+        subcategory[i] = 0;
+      }
+      if (nativeSymbol[i] !== null) {
+        f |= HasNativeSymbol;
+      } else {
+        nativeSymbol[i] = 0;
+      }
+      if (line[i] !== null) {
+        f |= HasLine;
+      } else {
+        line[i] = 0;
+      }
+      if (column[i] !== null) {
+        f |= HasColumn;
+      } else {
+        column[i] = 0;
+      }
+      if (originalLocation[i] !== null) {
+        f |= HasOriginalLocation;
+      } else {
+        originalLocation[i] = 0;
+      }
+      if (innerWindowID[i] === null) {
+        innerWindowID[i] = 0;
+      }
+      flags[i] = f;
+    }
+    frameTable.flags = flags;
+    delete frameTable.inlineDepth;
+    if (frameTable.address instanceof Int32Array) {
+      // Version 71 wants this column to be a Uint32Array.
+      // Reinterpret existing bits as u32. We already set all
+      // -1 to 0, and there shouldn't be any other negative values.
+      frameTable.address = new Uint32Array(frameTable.address);
+    }
+  },
+  [72]: (profile: any) => {
+    const extensionTextMarkerSchema = {
+      name: 'ExtensionText',
+      tableLabel:
+        "{marker.data.extensionId}{marker.data.extensionId ? ', ' : ''}{marker.data.name}",
+      chartLabel:
+        "{marker.data.extensionId}{marker.data.extensionId ? ', ' : ''}{marker.data.name}",
+      display: ['marker-chart', 'marker-table'],
+      fields: [
+        {
+          key: 'extensionId',
+          label: 'Extension ID',
+          format: 'string',
+          containsPII: ['extension-id'],
+        },
+        {
+          key: 'name',
+          label: 'Details',
+          format: 'string',
+          containsPII: ['url'],
+        },
+      ],
+    };
+
+    let isExtensionTextMarkerSchemaUsed = false;
+    const stringArray = profile.shared.stringArray;
+    for (const thread of profile.threads) {
+      const { markers } = thread;
+      for (let markerIndex = 0; markerIndex < markers.length; markerIndex++) {
+        const payload = markers.data[markerIndex];
+        if (!payload || payload.type !== 'Text') {
+          continue;
+        }
+
+        const markerName = stringArray[markers.name[markerIndex]];
+        const text =
+          typeof payload.name === 'number'
+            ? stringArray[payload.name]
+            : payload.name;
+        if (typeof text !== 'string') {
+          continue;
+        }
+
+        if (
+          markerName === 'ExtensionParent' ||
+          markerName === 'ExtensionChild'
+        ) {
+          const match = /^(.*), (api_(?:call|event): [\s\S]*)$/.exec(text);
+          if (match) {
+            markers.data[markerIndex] = {
+              ...payload,
+              type: 'ExtensionText',
+              name: match[2],
+              extensionId: match[1],
+            };
+            isExtensionTextMarkerSchemaUsed = true;
+          }
+        } else if (markerName === 'Extension Suspend') {
+          const match = / by .*$/.exec(text);
+          if (match) {
+            markers.data[markerIndex] = {
+              ...payload,
+              type: 'ExtensionText',
+              name: text.slice(0, match.index),
+              extensionId: text.slice(match.index + ' by '.length),
+            };
+            isExtensionTextMarkerSchemaUsed = true;
+          }
+        }
+      }
+    }
+
+    const schemaNames = new Set(
+      profile.meta.markerSchema.map((schema: any) => schema.name)
+    );
+    if (
+      isExtensionTextMarkerSchemaUsed &&
+      !schemaNames.has(extensionTextMarkerSchema.name)
+    ) {
+      profile.meta.markerSchema.push(extensionTextMarkerSchema);
+    }
+
+    const piiCategoriesBySchemaName = new Map<string, Map<string, string[]>>([
+      [
+        'Network',
+        new Map([
+          ['URI', ['url']],
+          ['RedirectURI', ['url']],
+          ['isPrivateBrowsing', ['private-browsing']],
+        ]),
+      ],
+      ['Text', new Map([['name', ['url']]])],
+      ['PreferenceRead', new Map([['prefValue', ['preference-value']]])],
+    ]);
+
+    for (const schema of profile.meta.markerSchema) {
+      const piiCategoriesByField = piiCategoriesBySchemaName.get(schema.name);
+      if (!piiCategoriesByField) {
+        continue;
+      }
+
+      for (const field of schema.fields) {
+        const containsPII = piiCategoriesByField.get(field.key);
+        if (containsPII && !field.containsPII) {
+          field.containsPII = containsPII;
+        }
+      }
+
+      const existingFieldKeys = new Set(
+        schema.fields.map((field: any) => field.key)
+      );
+      for (const [key, containsPII] of piiCategoriesByField) {
+        if (!existingFieldKeys.has(key)) {
+          schema.fields.push({
+            key,
+            format: 'string',
+            hidden: true,
+            containsPII,
+          });
+        }
+      }
+    }
+  },
+  [73]: (profile: any) => {
+    for (const schema of profile.meta.markerSchema ?? []) {
+      if (schema.name === 'FileIO' && schema.tableLabel === undefined) {
+        schema.tableLabel =
+          "{marker.data.source ? '(' : ''}{marker.data.source}{marker.data.source ? ') ' : ''}{marker.data.operation}{marker.data.filename ? ' — ' : ''}{marker.data.filename}";
+      }
+    }
+  },
+  [74]: (profile: any) => {
+    // The columns of the native symbol table (`profile.shared.nativeSymbols`)
+    // can now optionally be stored as typed arrays:
+    //  - `libIndex` (`Int32Array`)
+    //  - `address` (`Int32Array`)
+    //  - `name` (`Int32Array`)
+    //  - `functionSize` (`Int32Array`).
+    //
+    // Regular JS / JSON arrays are still accepted.
+    //
+    // For `functionSize`, the sentinel for "size unknown" is now `-1`.
+    //
+    // This upgrader also removes any `null` values in the `address` column;
+    // the `address` column never allowed null according to the type, but the
+    // upgrader for version 36 inserted null in some cases, so we fix it here.
+    const { nativeSymbols } = profile.shared;
+    for (let i = 0; i < nativeSymbols.length; i++) {
+      // null -> -1 for functionSize:
+      if (nativeSymbols.functionSize[i] === null) {
+        nativeSymbols.functionSize[i] = -1;
+      }
+      // null -> 0 for address (null was never valid but the 36 upgrader used it)
+      if (nativeSymbols.address[i] === null) {
+        nativeSymbols.address[i] = 0;
+      }
+    }
+  },
+  [75]: (profile: any) => {
+    // The func table representation changed, mirroring the v71 frame table
+    // change:
+    //  - A new `flags` bitfield column was added (Uint8Array or plain array).
+    //  - The `isJS` and `relevantForJS` boolean columns were removed; the
+    //    IsJS / RelevantForJS flag bits carry the same information.
+    //  - The `resource`, `source`, `lineNumber`, `columnNumber`, and
+    //    `originalLocation` columns are no longer nullable in-band. When the
+    //    corresponding "Has..." flag is not set, the value in the column is
+    //    ignored and can be any placeholder (we write 0).
+    //  - All columns may now optionally be stored as typed arrays
+    //    (Int32Array for the non-flags columns).
+
+    // A snapshot of the `FuncFlag` enum as of version 75. Don't refer to the
+    // current `FuncFlag` enum here; upgraders must keep working even if later
+    // versions renumber or remove flags.
+    const IsJS = 1 << 0;
+    const RelevantForJS = 1 << 1;
+    const HasResource = 1 << 2;
+    const HasSource = 1 << 3;
+    const HasLine = 1 << 4;
+    const HasColumn = 1 << 5;
+    const HasOriginalLocation = 1 << 6;
+
+    const { funcTable } = profile.shared;
+    const {
+      isJS,
+      relevantForJS,
+      resource,
+      source,
+      lineNumber,
+      columnNumber,
+      originalLocation,
+      length,
+    } = funcTable;
+    const flags = new Array<number>(length);
+    for (let i = 0; i < length; i++) {
+      let f = 0;
+      if (isJS[i]) {
+        f |= IsJS;
+      }
+      if (relevantForJS[i]) {
+        f |= RelevantForJS;
+      }
+      if (
+        resource[i] !== -1 &&
+        resource[i] !== null &&
+        resource[i] !== undefined
+      ) {
+        f |= HasResource;
+      } else {
+        resource[i] = 0;
+      }
+      if (source[i] !== null && source[i] !== undefined) {
+        f |= HasSource;
+      } else {
+        source[i] = 0;
+      }
+      if (lineNumber[i] !== null && lineNumber[i] !== undefined) {
+        f |= HasLine;
+      } else {
+        lineNumber[i] = 0;
+      }
+      if (columnNumber[i] !== null && columnNumber[i] !== undefined) {
+        f |= HasColumn;
+      } else {
+        columnNumber[i] = 0;
+      }
+      if (originalLocation[i] !== null && originalLocation[i] !== undefined) {
+        f |= HasOriginalLocation;
+      } else {
+        originalLocation[i] = 0;
+      }
+      flags[i] = f;
+    }
+    funcTable.flags = flags;
+    delete funcTable.isJS;
+    delete funcTable.relevantForJS;
+  },
+  [76]: (profile: any) => {
+    // The CompositorScreenshot marker payload's `windowWidth` and `windowHeight` fields were replaced with
+    // a single `windowSize` field, `windowID` is now always a string, and these markers are now stored as
+    // start / end marker pairs whose name carries the window ID, instead of instant markers.
+    // The CompositorScreenshotWindowDestroyed marker becomes the end marker of that window's last screenshot.
+    // A CompositorScreenshot marker schema is added if there are any CompositorScreenshot markers.
+    const INTERVAL_START = 2;
+    const INTERVAL_END = 3;
+    const stringTable = StringTable.withBackingArray(
+      profile.shared.stringArray
+    );
+
+    let hasCompositorScreenshots = false;
+    for (const thread of profile.threads) {
+      const { markers } = thread;
+      if (
+        !markers.data.some((data: any) => data?.type === 'CompositorScreenshot')
+      ) {
+        continue;
+      }
+      hasCompositorScreenshots = true;
+
+      const newMarkers: any = {
+        data: [],
+        name: [],
+        startTime: [],
+        endTime: [],
+        phase: [],
+        category: [],
+        length: 0,
+      };
+      const hasThreadId = Boolean(markers.threadId);
+      if (hasThreadId) {
+        newMarkers.threadId = [];
+      }
+
+      const push = (
+        name: number,
+        startTime: number | null,
+        endTime: number | null,
+        phase: number,
+        sourceIndex: number,
+        data: any
+      ) => {
+        newMarkers.name.push(name);
+        newMarkers.startTime.push(startTime);
+        newMarkers.endTime.push(endTime);
+        newMarkers.phase.push(phase);
+        newMarkers.category.push(markers.category[sourceIndex]);
+        newMarkers.data.push(data);
+        if (hasThreadId) {
+          newMarkers.threadId.push(markers.threadId[sourceIndex]);
+        }
+        newMarkers.length++;
+      };
+
+      const openWindows = new Set();
+      for (let i = 0; i < markers.length; i++) {
+        const data = markers.data[i];
+        if (!data || data.type !== 'CompositorScreenshot') {
+          push(
+            markers.name[i],
+            markers.startTime[i],
+            markers.endTime[i],
+            markers.phase[i],
+            i,
+            data
+          );
+          continue;
+        }
+
+        const windowID = String(data.windowID);
+        const time = markers.startTime[i];
+        const name = stringTable.indexForString(
+          `CompositorScreenshot ${windowID}`
+        );
+        const isWindowDestroyed =
+          stringTable.getString(markers.name[i]) ===
+          'CompositorScreenshotWindowDestroyed';
+        if (openWindows.delete(windowID) || isWindowDestroyed) {
+          push(name, null, time, INTERVAL_END, i, {
+            type: 'CompositorScreenshot',
+            windowID,
+          });
+        }
+        if (isWindowDestroyed) {
+          continue;
+        }
+
+        const { windowWidth, windowHeight, ...startData } = data;
+        startData.windowID = windowID;
+        if (windowWidth !== undefined && windowHeight !== undefined) {
+          startData.windowSize = { width: windowWidth, height: windowHeight };
+        }
+
+        push(name, time, null, INTERVAL_START, i, startData);
+        openWindows.add(windowID);
+      }
+
+      thread.markers = newMarkers;
+    }
+
+    profile.meta.markerSchema = profile.meta.markerSchema.filter(
+      ({ name }: any) => name !== 'CompositorScreenshot'
+    );
+    if (hasCompositorScreenshots) {
+      profile.meta.markerSchema.push({
+        name: 'CompositorScreenshot',
+        display: ['marker-chart', 'marker-table', 'timeline-screenshots'],
+        fields: [
+          {
+            key: 'url',
+            label: 'Image',
+            format: {
+              type: 'screenshot-data-url',
+              sizeFieldForAspectRatio: 'windowSize',
+            },
+          },
+          {
+            key: 'windowSize',
+            label: 'Window Size',
+            format: 'screenshot-size',
+          },
+          { key: 'windowID', label: 'Window ID', format: 'string' },
+        ],
+        description:
+          'This marker spans the time between each composite of a window and shows the window contents during that time.',
+      });
+    }
   },
   // If you add a new upgrader here, please document the change in
   // `docs-developer/CHANGELOG-formats.md`.

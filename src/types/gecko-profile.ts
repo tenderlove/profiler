@@ -141,17 +141,15 @@ export type GeckoSamples = {
         // milliseconds since the last event was processed in this
         // thread's event loop at the time that the sample was taken
         Milliseconds,
-        (
-          // Index into the values buffer containing a binary representation of the argumentValues
-          // It's present only when the JS Execution Tracing feature is enabled in Firefox
-          //   OR
-          // CPU usage value of the current thread.
-          // It's present only when the CPU Utilization feature is enabled in Firefox.
-          //
-          // NOTE: these two options are mutually exclusive since CPU Utilization is
-          // mutually exclusive with JS Execution Tracing
-          number | null
-        ),
+        // Index into the values buffer containing a binary representation of the argumentValues
+        // It's present only when the JS Execution Tracing feature is enabled in Firefox
+        //   OR
+        // CPU usage value of the current thread.
+        // It's present only when the CPU Utilization feature is enabled in Firefox.
+        //
+        // NOTE: these two options are mutually exclusive since CPU Utilization is
+        // mutually exclusive with JS Execution Tracing
+        number | null,
       ]
   >;
 };
@@ -217,29 +215,19 @@ export type GeckoFrameTable = {
       IndexIntoStringTable,
       // for label frames, whether this frame should be shown in "JS only" stacks
       boolean,
-      (
-        // innerWindowID of JS frames. See the comment inside FrameTable in src/types/profile.js
-        // for more information.
-        null | number
-      ),
+      // innerWindowID of JS frames. See the comment inside FrameTable in src/types/profile.js
+      // for more information.
+      null | number,
       // for JS frames, an index into the string table, usually "Baseline" or "Ion"
       null | IndexIntoStringTable,
-      (
-        // The line of code
-        null | number
-      ),
-      (
-        // The column of code
-        null | number
-      ),
-      (
-        // index into profile.meta.categories
-        null | number
-      ),
-      (
-        // index into profile.meta.categories[category].subcategories. Always non-null if category is non-null.
-        null | number
-      ),
+      // The line of code
+      null | number,
+      // The column of code
+      null | number,
+      // index into profile.meta.categories
+      null | number,
+      // index into profile.meta.categories[category].subcategories. Always non-null if category is non-null.
+      null | number,
     ]
   >;
 };
@@ -578,22 +566,29 @@ export type ProfilingLog = {
 
 /**
  * Table containing source code file references in the Gecko profile format.
- * Each entry maps a unique UUID to a filename, allowing frames to reference
- * their source files for displaying source code context in the profiler UI.
- * This table is optional and only present in newer Firefox versions.
+ * Each entry maps a unique ID to a filename and optional metadata, allowing
+ * frames to reference their source files for displaying source code context
+ * in the profiler UI. This table is optional and only present in newer
+ * Firefox versions.
  *
  * Note: In Gecko profiles, this table only contains sources for JavaScript code.
  * The processed profile format expands this to include native code sources as well.
  */
 export type GeckoSourceTable = {
   schema: {
-    uuid: 0;
+    id: 0;
     filename: 1;
+    startLine: 2;
+    startColumn: 3;
+    sourceMapURL: 4;
   };
   data: Array<
     [
-      string, // UUID for the source
-      string, // Filename of the source
+      string, // ID for the source.
+      string, // Filename of the source.
+      number, // Start line of the source (1-based).
+      number, // Start column of the source (1-based).
+      string | null, // URL to the source map for this source, if available.
     ]
   >;
 };

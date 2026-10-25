@@ -2,77 +2,87 @@
 
 exports[`TrackMemory draws a dot that matches the snapshot 1`] = `
 <div
-  class="timelineTrackMemoryGraphDot"
+  class="timelineTrackCounterGraphDot"
   style="left: 20px; top: 2.697563250235465px; background-color: rgb(215, 110, 0);"
 />
 `;
 
 exports[`TrackMemory has a tooltip that matches the snapshot 1`] = `
 <div
-  class="timelineTrackMemoryTooltip"
+  class="timelineTrackCounterTooltip"
 >
   <div
-    class="timelineTrackMemoryTooltipLine"
+    class="tooltipDetails"
   >
-    <span
-      class="timelineTrackMemoryTooltipNumber"
+    <div
+      class="tooltipLabel"
     >
-      0B
-    </span>
-    relative memory at this time
-  </div>
-  <div
-    class="timelineTrackMemoryTooltipLine"
-  >
-    <span
-      class="timelineTrackMemoryTooltipNumber"
+      relative memory at this time
+      :
+    </div>
+    0B
+    <div
+      class="tooltipLabel"
     >
-      2B
-    </span>
-    memory range in graph
-  </div>
-  <div
-    class="timelineTrackMemoryTooltipLine"
-  >
-    <span
-      class="timelineTrackMemoryTooltipNumber"
+      memory range in graph
+      :
+    </div>
+    2B
+    <div
+      class="tooltipLabel"
     >
-      36
-    </span>
-    allocations and deallocations since the previous sample
+      allocations and deallocations since the previous sample
+      :
+    </div>
+    36
   </div>
 </div>
 `;
 
 exports[`TrackMemory has a tooltip that matches the snapshot for counts equalling zero 1`] = `
 <div
-  class="timelineTrackMemoryTooltip"
+  class="timelineTrackCounterTooltip"
 >
   <div
-    class="timelineTrackMemoryTooltipLine"
+    class="tooltipDetails"
   >
-    <span
-      class="timelineTrackMemoryTooltipNumber"
+    <div
+      class="tooltipLabel"
     >
-      0B
-    </span>
-    relative memory at this time
-  </div>
-  <div
-    class="timelineTrackMemoryTooltipLine"
-  >
-    <span
-      class="timelineTrackMemoryTooltipNumber"
+      relative memory at this time
+      :
+    </div>
+    0B
+    <div
+      class="tooltipLabel"
     >
-      2B
-    </span>
-    memory range in graph
+      memory range in graph
+      :
+    </div>
+    2B
   </div>
 </div>
 `;
 
 exports[`TrackMemory matches the 2d canvas draw snapshot 1`] = `
 Array [
+  Array [
+    "clearRect",
+    0,
+    0,
+    80,
+    10,
+  ],
+  Array [
+    "scale",
+    1,
+    1,
+  ],
+  Array [
+    "scale",
+    1,
+    1,
+  ],
   Array [
     "clearRect",
     0,
@@ -160,60 +170,55 @@ Array [
   Array [
     "fill",
   ],
-  Array [
-    "clearRect",
-    0,
-    0,
-    80,
-    10,
-  ],
-  Array [
-    "scale",
-    1,
-    1,
-  ],
-  Array [
-    "scale",
-    1,
-    1,
-  ],
 ]
 `;
 
 exports[`TrackMemory matches the component snapshot 1`] = `
 <div
-  class="timelineTrackMemory"
-  style="height: 40px; --graph-height: 25px; --markers-height: 15px;"
+  class="timelineTrackCounter"
+  style="--graph-height: 25px; --markers-height: 15px;"
 >
   <div
-    class="timelineMarkers timelineMarkersMemory selected"
-    data-testid="TimelineMarkersMemory"
+    style="display: contents;"
   >
     <div
-      class="react-contextmenu-wrapper"
+      class="timelineMarkers timelineMarkersCounter selected"
+      data-testid="TimelineMarkersCounter"
     >
-      <div>
-        <canvas
-          class="timelineMarkersCanvas"
-          height="10"
-          width="80"
-        />
+      <div
+        class="react-contextmenu-wrapper"
+      >
+        <div>
+          <canvas
+            class="timelineMarkersCanvas"
+            height="10"
+            width="80"
+          />
+        </div>
       </div>
     </div>
   </div>
   <div
-    class="timelineTrackMemoryGraph"
+    style="display: contents;"
   >
-    <div>
-      <canvas
-        class="timelineTrackMemoryCanvas"
-        height="25"
-        width="80"
-      />
-    </div>
     <div
-      class="timelineEmptyThreadIndicator"
-    />
+      class="timelineTrackCounterGraph"
+    >
+      <div>
+        <canvas
+          class="timelineTrackCounterCanvas"
+          height="25"
+          width="80"
+        />
+      </div>
+      <div
+        style="display: contents;"
+      >
+        <div
+          class="timelineEmptyThreadIndicator"
+        />
+      </div>
+    </div>
   </div>
 </div>
 `;

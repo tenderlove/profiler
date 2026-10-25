@@ -10,14 +10,21 @@ import { adjustMarkerTimestamps } from './process-profile';
 import {
   getEmptyProfile,
   getEmptyResourceTable,
-  getEmptyNativeSymbolTable,
-  getEmptyFrameTable,
-  getEmptyFuncTable,
-  getEmptyRawStackTable,
-  getEmptyRawMarkerTable,
-  getEmptySamplesTableWithEventDelay,
-  shallowCloneRawMarkerTable,
+  getRawNativeSymbolTableBuilder,
+  finishRawNativeSymbolTableBuilder,
+  finishRawFrameTableBuilder,
+  finishRawFuncTableBuilder,
+  finishRawSamplesTableBuilder,
+  getRawFrameTableBuilder,
+  getRawFuncTableBuilder,
+  getRawStackTableBuilder,
+  finishRawStackTableBuilder,
+  getRawMarkerTableBuilder,
+  getRawSamplesTableBuilderWithEventDelay,
+  getRawMarkerTableBuilderFromExisting,
+  finishRawMarkerTableBuilder,
   getEmptySourceTable,
+  type RawMarkerTableBuilder,
 } from './data-structures';
 import {
   filterRawThreadSamplesToRange,
@@ -30,6 +37,7 @@ import {
   filterRawMarkerTableToRange,
   deriveMarkersFromRawMarkerTable,
   correlateIPCMarkers,
+  getMarkerTypesForDisplay,
 } from './marker-data';
 import { computeStringIndexMarkerFieldsByDataType } from './marker-schema';
 import { ensureExists, getFirstItemFromSet } from '../utils/types';
@@ -48,14 +56,16 @@ import type {
   IndexIntoStackTable,
   IndexIntoStringTable,
   IndexIntoSourceTable,
-  FuncTable,
-  FrameTable,
+  IndexIntoSourceLocationTable,
+  RawFrameTable,
   Lib,
-  NativeSymbolTable,
+  RawFuncTable,
+  RawNativeSymbolTable,
   ResourceTable,
   RawSamplesTable,
   RawStackTable,
   SourceTable,
+  SourceLocationTable,
   UrlState,
   ImplementationFilter,
   TransformStacksPerThread,
@@ -66,7 +76,13 @@ import type {
   Tid,
   RawProfileSharedData,
   ProfileIndexTranslationMaps,
+  StartEndRange,
+  Pid,
+  RawCounter,
+  ProfilerOverhead,
+  ThreadIndex,
 } from 'firefox-profiler/types';
+import { FrameFlag, FuncFlag } from 'firefox-profiler/types';
 import { translateTransformStack } from './transforms';
 
 /**
@@ -109,9 +125,19 @@ export function mergeProfilesForDiffing(
       (resultProfile.meta as any)[key] = value;
     }
   }
-  // Ensure it has a copy of the marker schema and categories, even though these could
+  // Combine the marker schemas.
+  const markerSchemaNames = new Set<string>();
+  resultProfile.meta.markerSchema = [];
+  for (const profile of profiles) {
+    for (const schema of profile.meta.markerSchema) {
+      if (!markerSchemaNames.has(schema.name)) {
+        markerSchemaNames.add(schema.name);
+        resultProfile.meta.markerSchema.push(schema);
+      }
+    }
+  }
+  // Ensure it has a copy of the categories, even though these could
   // be different between the two profiles.
-  resultProfile.meta.markerSchema = profiles[0].meta.markerSchema;
   resultProfile.meta.categories = profiles[0].meta.categories;
 
   resultProfile.meta.interval = Math.min(
@@ -121,6 +147,10 @@ export function mergeProfilesForDiffing(
   // Precompute marker fields that need adjusting.
   const stringIndexMarkerFieldsByDataType =
     computeStringIndexMarkerFieldsByDataType(resultProfile.meta.markerSchema);
+  const screenshotMarkerTypes = getMarkerTypesForDisplay(
+    resultProfile.meta.markerSchema,
+    'timeline-screenshots'
+  );
 
   // If all profiles have an unknown symbolication status, we keep this unknown
   // status for the combined profile. Otherwise, we mark the combined profile
@@ -169,7 +199,20 @@ export function mergeProfilesForDiffing(
       );
     }
     const profile = profiles[i];
+    if (selectedThreadIndex >= profile.threads.length) {
+      throw new Error(
+        `Thread index ${selectedThreadIndex} is out of bounds for profile ${i} (${profile.threads.length} threads).`
+      );
+    }
     let thread = { ...profile.threads[selectedThreadIndex] };
+
+    // Make sure that screenshot markers make it into the merged profile, even
+    // if they're not on the selected thread.
+    thread.markers = getThreadMarkersAndScreenshotMarkers(
+      profile.threads,
+      profile.threads[selectedThreadIndex],
+      screenshotMarkerTypes
+    );
 
     transformStacks[i] = translateTransformStack(
       profileSpecific.transforms[selectedThreadIndex] ?? [],
@@ -192,13 +235,6 @@ export function mergeProfilesForDiffing(
 
     [thread] = updateRawThreadStacks([thread], (stackIndex) =>
       _mapNullableStack(stackIndex, oldStackToNewStackPlusOne)
-    );
-
-    // Make sure that screenshot markers make it into the merged profile, even
-    // if they're not on the selected thread.
-    thread.markers = getThreadMarkersAndScreenshotMarkers(
-      profile.threads,
-      thread
     );
 
     // We filter the profile using the range from the state for this profile.
@@ -369,6 +405,7 @@ type TranslationMapForStacks = Int32Array;
 type TranslationMapForLibs = Int32Array;
 type TranslationMapForStrings = Int32Array;
 type TranslationMapForSources = Int32Array;
+type TranslationMapForOriginalLocation = Int32Array;
 
 /**
  * Merges several categories lists into one, resolving duplicates if necessary.
@@ -438,13 +475,13 @@ export function mergeSharedData(profiles: Profile[]): {
       translationMapsForStrings
     );
   const {
+    sourceLocationTable: newSourceLocationTable,
+    translationMaps: translationMapsForOriginalLocation,
+  } = mergeSourceLocationTables(profiles, translationMapsForSources);
+  const {
     resourceTable: newResourceTable,
     translationMaps: translationMapsForResources,
-  } = mergeResourceTables(
-    profiles,
-    translationMapsForStrings,
-    translationMapsForLibs
-  );
+  } = mergeResourceTables(profiles, translationMapsForStrings);
   const {
     nativeSymbols: newNativeSymbols,
     translationMaps: translationMapsForNativeSymbols,
@@ -458,6 +495,7 @@ export function mergeSharedData(profiles: Profile[]): {
       profiles,
       translationMapsForResources,
       translationMapsForSources,
+      translationMapsForOriginalLocation,
       translationMapsForStrings
     );
   const {
@@ -467,7 +505,9 @@ export function mergeSharedData(profiles: Profile[]): {
     profiles,
     translationMapsForFuncs,
     translationMapsForNativeSymbols,
-    translationMapsForCategories
+    translationMapsForOriginalLocation,
+    translationMapsForCategories,
+    translationMapsForLibs
   );
   const {
     stackTable: newStackTable,
@@ -482,6 +522,7 @@ export function mergeSharedData(profiles: Profile[]): {
     resourceTable: newResourceTable,
     stringArray: newStringArray,
     sources: newSources,
+    sourceLocationTable: newSourceLocationTable,
   };
 
   const translationMapsPerProfile = profiles.map((profile, i) => {
@@ -556,17 +597,27 @@ function mergeSources(
     const oldStringToNewStringPlusOne = translationMapsForStrings[profileIndex];
 
     for (let i = 0; i < sources.length; i++) {
-      const uuid = sources.uuid[i];
+      const id = sources.id[i];
       const originalUrlIndex = sources.filename[i];
       const newUrlIndex = oldStringToNewStringPlusOne[originalUrlIndex] - 1;
 
-      const sourceKey = uuid ?? `null-uuid-${newUrlIndex}`;
+      const originalSourceMapURLIndex = sources.sourceMapURL[i];
+      const newSourceMapURLIndex =
+        originalSourceMapURLIndex !== null
+          ? oldStringToNewStringPlusOne[originalSourceMapURLIndex] - 1
+          : null;
+
+      const sourceKey = id ?? `null-id-${newUrlIndex}`;
       let insertedSourceIndex = mapOfInsertedSources.get(sourceKey);
       if (insertedSourceIndex === undefined) {
         // Add new source
         insertedSourceIndex = newSources.length;
-        newSources.uuid[insertedSourceIndex] = uuid;
+        newSources.id[insertedSourceIndex] = id;
         newSources.filename[insertedSourceIndex] = newUrlIndex;
+        newSources.startLine[insertedSourceIndex] = sources.startLine[i];
+        newSources.startColumn[insertedSourceIndex] = sources.startColumn[i];
+        newSources.sourceMapURL[insertedSourceIndex] = newSourceMapURLIndex;
+        newSources.content[insertedSourceIndex] = sources.content[i];
         newSources.length++;
         mapOfInsertedSources.set(sourceKey, insertedSourceIndex);
       }
@@ -581,6 +632,52 @@ function mergeSources(
     sources: newSources,
     translationMaps,
   };
+}
+
+/**
+ * Combines the sourceLocationTables from multiple profiles. Each row is copied
+ * verbatim except `source`, which is translated through the source
+ * translation map. Rows are not deduplicated across profiles. This is leaf
+ * data with no downstream constraint that would benefit from a stable key.
+ */
+function mergeSourceLocationTables(
+  profiles: ReadonlyArray<Profile>,
+  translationMapsForSources: TranslationMapForSources[]
+): {
+  sourceLocationTable: SourceLocationTable;
+  translationMaps: TranslationMapForOriginalLocation[];
+} {
+  const newSourceLocationTable: SourceLocationTable = {
+    source: [],
+    line: [],
+    column: [],
+    length: 0,
+  };
+
+  const translationMaps = profiles.map((profile, profileIndex) => {
+    const sourceLocationTable = profile.shared.sourceLocationTable;
+    const sourceTranslation = translationMapsForSources[profileIndex];
+    const oldOriginalLocationToNewPlusOne = new Int32Array(
+      sourceLocationTable.length
+    );
+
+    for (let i = 0; i < sourceLocationTable.length; i++) {
+      const source = sourceLocationTable.source[i];
+      const newOriginalSource = sourceTranslation[source] - 1;
+
+      const newIndex = newSourceLocationTable.length;
+      newSourceLocationTable.source.push(newOriginalSource);
+      newSourceLocationTable.line.push(sourceLocationTable.line[i]);
+      newSourceLocationTable.column.push(sourceLocationTable.column[i]);
+      newSourceLocationTable.length++;
+
+      oldOriginalLocationToNewPlusOne[i] = newIndex + 1;
+    }
+
+    return oldOriginalLocationToNewPlusOne;
+  });
+
+  return { sourceLocationTable: newSourceLocationTable, translationMaps };
 }
 
 function adjustStringIndexes(
@@ -641,7 +738,7 @@ function mergeLibs(libsPerProfile: Lib[][]): {
     const oldLibToNewLibPlusOne = new Int32Array(libs.length);
 
     libs.forEach((lib, i) => {
-      const insertedLibKey = [lib.name, lib.debugName].join('#');
+      const insertedLibKey = [lib.debugName, lib.breakpadId].join('#');
       const insertedLibIndex = mapOfInsertedLibs.get(insertedLibKey);
       if (insertedLibIndex !== undefined) {
         oldLibToNewLibPlusOne[i] = insertedLibIndex + 1;
@@ -667,13 +764,6 @@ function _mapLib(
   return oldLibToNewLibPlusOne[libIndex] - 1;
 }
 
-function _mapNullableLib(
-  libIndex: IndexIntoLibs | null,
-  oldLibToNewLibPlusOne: TranslationMapForLibs
-): IndexIntoLibs | null {
-  return libIndex !== null ? oldLibToNewLibPlusOne[libIndex] - 1 : null;
-}
-
 function _mapString(
   stringIndex: IndexIntoStringTable,
   oldStringToNewStringPlusOne: TranslationMapForStrings
@@ -690,23 +780,25 @@ function _mapNullableString(
     : null;
 }
 
-function _mapNullableSource(
-  sourceIndex: IndexIntoSourceTable | null,
+function _mapSource(
+  sourceIndex: IndexIntoSourceTable,
   oldSourceToNewSourcePlusOne: TranslationMapForSources
-): IndexIntoStringTable | null {
-  return sourceIndex !== null
-    ? oldSourceToNewSourcePlusOne[sourceIndex] - 1
-    : null;
+): IndexIntoSourceTable {
+  return oldSourceToNewSourcePlusOne[sourceIndex] - 1;
 }
 
-function _mapFuncResource(
-  resourceIndex: IndexIntoResourceTable | -1,
+function _mapResource(
+  resourceIndex: IndexIntoResourceTable,
   oldResourceToNewResourcePlusOne: TranslationMapForResources
-): IndexIntoResourceTable | -1 {
-  if (resourceIndex === -1) {
-    return -1;
-  }
+): IndexIntoResourceTable {
   return oldResourceToNewResourcePlusOne[resourceIndex] - 1;
+}
+
+function _mapOriginalLocation(
+  originalLocationIndex: IndexIntoSourceLocationTable,
+  oldOriginalLocationToNewPlusOne: TranslationMapForOriginalLocation
+): IndexIntoSourceLocationTable {
+  return oldOriginalLocationToNewPlusOne[originalLocationIndex] - 1;
 }
 
 function _mapFunc(
@@ -723,26 +815,6 @@ function _mapFrame(
   return oldFrameToNewFramePlusOne[frameIndex] - 1;
 }
 
-function _mapNullableNativeSymbol(
-  nativeSymbolIndex: IndexIntoLibs | null,
-  oldNativeSymbolToNewNativeSymbolPlusOne: TranslationMapForNativeSymbols
-): IndexIntoLibs | null {
-  if (nativeSymbolIndex === null) {
-    return null;
-  }
-  return oldNativeSymbolToNewNativeSymbolPlusOne[nativeSymbolIndex] - 1;
-}
-
-function _mapNullableCategory(
-  categoryIndex: IndexIntoCategoryList | null,
-  oldCategoryToNewCategoryPlusOne: TranslationMapForCategories
-): IndexIntoCategoryList | null {
-  if (categoryIndex === null) {
-    return null;
-  }
-  return oldCategoryToNewCategoryPlusOne[categoryIndex] - 1;
-}
-
 function _mapNullableStack(
   stackIndex: IndexIntoStackTable | null,
   oldStackToNewStackPlusOne: TranslationMapForStacks
@@ -757,8 +829,7 @@ function _mapNullableStack(
  */
 function mergeResourceTables(
   profiles: ReadonlyArray<Profile>,
-  translationMapsForStrings: TranslationMapForStrings[],
-  translationMapsForLibs: TranslationMapForLibs[]
+  translationMapsForStrings: TranslationMapForStrings[]
 ): {
   resourceTable: ResourceTable;
   translationMaps: TranslationMapForResources[];
@@ -768,7 +839,6 @@ function mergeResourceTables(
   const newResourceTable = getEmptyResourceTable();
 
   profiles.forEach((profile, profileIndex) => {
-    const oldLibToNewLibPlusOne = translationMapsForLibs[profileIndex];
     const oldStringToNewStringPlusOne = translationMapsForStrings[profileIndex];
     const { resourceTable } = profile.shared;
     const oldResourceToNewResourcePlusOne = new Int32Array(
@@ -776,10 +846,6 @@ function mergeResourceTables(
     );
 
     for (let i = 0; i < resourceTable.length; i++) {
-      const libIndex = _mapNullableLib(
-        resourceTable.lib[i],
-        oldLibToNewLibPlusOne
-      );
       const nameIndex = _mapString(
         resourceTable.name[i],
         oldStringToNewStringPlusOne
@@ -801,7 +867,6 @@ function mergeResourceTables(
       oldResourceToNewResourcePlusOne[i] = newResourceTable.length + 1;
       mapOfInsertedResources.set(resourceKey, newResourceTable.length);
 
-      newResourceTable.lib.push(libIndex);
       newResourceTable.name.push(nameIndex);
       newResourceTable.host.push(hostIndex);
       newResourceTable.type.push(type);
@@ -822,13 +887,13 @@ function mergeNativeSymbolTables(
   translationMapsForStrings: TranslationMapForStrings[],
   translationMapsForLibs: TranslationMapForLibs[]
 ): {
-  nativeSymbols: NativeSymbolTable;
+  nativeSymbols: RawNativeSymbolTable;
   translationMaps: TranslationMapForNativeSymbols[];
 } {
   const mapOfInsertedNativeSymbols: Map<string, IndexIntoNativeSymbolTable> =
     new Map();
   const translationMaps: TranslationMapForNativeSymbols[] = [];
-  const newNativeSymbols = getEmptyNativeSymbolTable();
+  const newNativeSymbols = getRawNativeSymbolTableBuilder();
 
   profiles.forEach((profile, profileIndex) => {
     const oldLibToNewLibPlusOne = translationMapsForLibs[profileIndex];
@@ -874,7 +939,10 @@ function mergeNativeSymbolTables(
     translationMaps.push(oldNativeSymbolToNewNativeSymbolPlusOne);
   });
 
-  return { nativeSymbols: newNativeSymbols, translationMaps };
+  return {
+    nativeSymbols: finishRawNativeSymbolTableBuilder(newNativeSymbols),
+    translationMaps,
+  };
 }
 
 /**
@@ -886,11 +954,12 @@ function mergeFuncTables(
   profiles: ReadonlyArray<Profile>,
   translationMapsForResources: TranslationMapForResources[],
   translationMapsForSources: TranslationMapForSources[],
+  translationMapsForOriginalLocation: TranslationMapForOriginalLocation[],
   translationMapsForStrings: TranslationMapForStrings[]
-): { funcTable: FuncTable; translationMaps: TranslationMapForFuncs[] } {
+): { funcTable: RawFuncTable; translationMaps: TranslationMapForFuncs[] } {
   const mapOfInsertedFuncs = new Map<string, IndexIntoFuncTable>();
   const translationMaps: TranslationMapForFuncs[] = [];
-  const newFuncTable = getEmptyFuncTable();
+  const newFuncTable = getRawFuncTableBuilder();
 
   profiles.forEach((profile, profileIndex) => {
     const { funcTable } = profile.shared;
@@ -898,17 +967,20 @@ function mergeFuncTables(
       translationMapsForResources[profileIndex];
     const oldStringToNewStringPlusOne = translationMapsForStrings[profileIndex];
     const oldSourceToNewSourcePlusOne = translationMapsForSources[profileIndex];
+    const oldOriginalLocationToNewPlusOne =
+      translationMapsForOriginalLocation[profileIndex];
     const oldFuncToNewFuncPlusOne = new Int32Array(funcTable.length);
 
     for (let i = 0; i < funcTable.length; i++) {
-      const sourceIndex = _mapNullableSource(
-        funcTable.source[i],
-        oldSourceToNewSourcePlusOne
-      );
-      const resourceIndex = _mapFuncResource(
-        funcTable.resource[i],
-        oldResourceToNewResourcePlusOne
-      );
+      const flags = funcTable.flags[i];
+      const sourceIndex =
+        (flags & FuncFlag.HasSource) !== 0
+          ? _mapSource(funcTable.source[i], oldSourceToNewSourcePlusOne)
+          : 0;
+      const resourceIndex =
+        (flags & FuncFlag.HasResource) !== 0
+          ? _mapResource(funcTable.resource[i], oldResourceToNewResourcePlusOne)
+          : 0;
       const nameIndex = _mapString(
         funcTable.name[i],
         oldStringToNewStringPlusOne
@@ -923,7 +995,12 @@ function mergeFuncTables(
       //    number as well.
       // 3. Label frames: they have no resource, only a name. So we can't do
       //    better than this.
-      const funcKey = [nameIndex, resourceIndex, lineNumber].join('#');
+      const funcKey = [
+        nameIndex,
+        resourceIndex,
+        (flags & FuncFlag.HasResource) !== 0 ? 1 : 0,
+        (flags & FuncFlag.HasLine) !== 0 ? lineNumber : 'nil',
+      ].join('#');
       const insertedFuncIndex = mapOfInsertedFuncs.get(funcKey);
       if (insertedFuncIndex !== undefined) {
         oldFuncToNewFuncPlusOne[i] = insertedFuncIndex + 1;
@@ -932,13 +1009,20 @@ function mergeFuncTables(
       mapOfInsertedFuncs.set(funcKey, newFuncTable.length);
       oldFuncToNewFuncPlusOne[i] = newFuncTable.length + 1;
 
-      newFuncTable.isJS.push(funcTable.isJS[i]);
+      newFuncTable.flags.push(flags);
       newFuncTable.name.push(nameIndex);
       newFuncTable.resource.push(resourceIndex);
-      newFuncTable.relevantForJS.push(funcTable.relevantForJS[i]);
       newFuncTable.source.push(sourceIndex);
       newFuncTable.lineNumber.push(lineNumber);
       newFuncTable.columnNumber.push(funcTable.columnNumber[i]);
+      newFuncTable.originalLocation.push(
+        (flags & FuncFlag.HasOriginalLocation) !== 0
+          ? _mapOriginalLocation(
+              funcTable.originalLocation[i],
+              oldOriginalLocationToNewPlusOne
+            )
+          : 0
+      );
 
       newFuncTable.length++;
     }
@@ -946,7 +1030,10 @@ function mergeFuncTables(
     translationMaps.push(oldFuncToNewFuncPlusOne);
   });
 
-  return { funcTable: newFuncTable, translationMaps };
+  return {
+    funcTable: finishRawFuncTableBuilder(newFuncTable),
+    translationMaps,
+  };
 }
 
 /**
@@ -960,42 +1047,63 @@ function mergeFrameTables(
   profiles: ReadonlyArray<Profile>,
   translationMapsForFuncs: TranslationMapForFuncs[],
   translationMapsForNativeSymbols: TranslationMapForNativeSymbols[],
-  translationMapsForCategories: TranslationMapForCategories[]
-): { frameTable: FrameTable; translationMaps: TranslationMapForFrames[] } {
+  translationMapsForOriginalLocation: TranslationMapForOriginalLocation[],
+  translationMapsForCategories: TranslationMapForCategories[],
+  translationMapsForLibs: TranslationMapForLibs[]
+): { frameTable: RawFrameTable; translationMaps: TranslationMapForFrames[] } {
   const translationMaps: TranslationMapForFrames[] = [];
-  const newFrameTable = getEmptyFrameTable();
+  const newFrameTable = getRawFrameTableBuilder();
 
   profiles.forEach((profile, profileIndex) => {
     const { frameTable } = profile.shared;
     const oldFuncToNewFuncPlusOne = translationMapsForFuncs[profileIndex];
     const oldNativeSymbolToNewNativeSymbolPlusOne =
       translationMapsForNativeSymbols[profileIndex];
+    const oldOriginalLocationToNewPlusOne =
+      translationMapsForOriginalLocation[profileIndex];
     const oldCategoryToNewCategoryPlusOne =
       translationMapsForCategories[profileIndex];
+    const oldLibToNewLibPlusOne = translationMapsForLibs[profileIndex];
     const oldFrameToNewFramePlusOne = new Int32Array(frameTable.length);
 
     for (let i = 0; i < frameTable.length; i++) {
+      const flags = frameTable.flags[i];
       const func = _mapFunc(frameTable.func[i], oldFuncToNewFuncPlusOne);
-      const nativeSymbol = _mapNullableNativeSymbol(
-        frameTable.nativeSymbol[i],
-        oldNativeSymbolToNewNativeSymbolPlusOne
-      );
-      const category = _mapNullableCategory(
-        frameTable.category[i],
-        oldCategoryToNewCategoryPlusOne
-      );
+      const nativeSymbol =
+        (flags & FrameFlag.HasNativeSymbol) !== 0
+          ? oldNativeSymbolToNewNativeSymbolPlusOne[
+              frameTable.nativeSymbol[i]
+            ] - 1
+          : 0;
+      const category =
+        (flags & FrameFlag.HasCategory) !== 0
+          ? oldCategoryToNewCategoryPlusOne[frameTable.category[i]] - 1
+          : 0;
       // TODO issue #2151: Also adjust subcategories.
       const subcategory = frameTable.subcategory[i];
 
+      newFrameTable.flags.push(flags);
       newFrameTable.address.push(frameTable.address[i]);
-      newFrameTable.inlineDepth.push(frameTable.inlineDepth[i]);
       newFrameTable.category.push(category);
       newFrameTable.subcategory.push(subcategory);
       newFrameTable.nativeSymbol.push(nativeSymbol);
       newFrameTable.func.push(func);
+      newFrameTable.lib.push(
+        (flags & FrameFlag.HasAddress) !== 0
+          ? _mapLib(frameTable.lib[i], oldLibToNewLibPlusOne)
+          : 0
+      );
       newFrameTable.innerWindowID.push(frameTable.innerWindowID[i]);
       newFrameTable.line.push(frameTable.line[i]);
       newFrameTable.column.push(frameTable.column[i]);
+      newFrameTable.originalLocation.push(
+        (flags & FrameFlag.HasOriginalLocation) !== 0
+          ? _mapOriginalLocation(
+              frameTable.originalLocation[i],
+              oldOriginalLocationToNewPlusOne
+            )
+          : 0
+      );
 
       oldFrameToNewFramePlusOne[i] = newFrameTable.length + 1;
       newFrameTable.length++;
@@ -1004,7 +1112,10 @@ function mergeFrameTables(
     translationMaps.push(oldFrameToNewFramePlusOne);
   });
 
-  return { frameTable: newFrameTable, translationMaps };
+  return {
+    frameTable: finishRawFrameTableBuilder(newFrameTable),
+    translationMaps,
+  };
 }
 
 /**
@@ -1019,7 +1130,7 @@ function mergeStackTables(
   translationMapsForFrames: TranslationMapForFrames[]
 ): { stackTable: RawStackTable; translationMaps: TranslationMapForStacks[] } {
   const translationMaps: TranslationMapForStacks[] = [];
-  const newStackTable = getEmptyRawStackTable();
+  const newStackTable = getRawStackTableBuilder();
 
   profiles.forEach((profile, profileIndex) => {
     const { stackTable } = profile.shared;
@@ -1031,7 +1142,8 @@ function mergeStackTables(
         stackTable.frame[i],
         oldFrameToNewFramePlusOne
       );
-      const prefix = stackTable.prefix[i];
+      const offset = stackTable.prefixOffset[i];
+      const prefix = offset === 0 ? null : i - offset;
       const newPrefix =
         prefix === null ? null : oldStackToNewStackPlusOne[prefix] - 1;
 
@@ -1045,7 +1157,10 @@ function mergeStackTables(
     translationMaps.push(oldStackToNewStackPlusOne);
   });
 
-  return { stackTable: newStackTable, translationMaps };
+  return {
+    stackTable: finishRawStackTableBuilder(newStackTable),
+    translationMaps,
+  };
 }
 
 /**
@@ -1064,21 +1179,19 @@ function combineSamplesDiffing(
 ): RawSamplesTable {
   const [
     {
-      thread: { samples: samples1, tid: tid1 },
+      thread: { samples: samples1 },
       weightMultiplier: weightMultiplier1,
     },
     {
-      thread: { samples: samples2, tid: tid2 },
+      thread: { samples: samples2 },
       weightMultiplier: weightMultiplier2,
     },
   ] = threadsAndWeightMultipliers;
 
   const newWeight: number[] = [];
-  const newThreadId: Tid[] = [];
   const newSamples = {
-    ...getEmptySamplesTableWithEventDelay(),
+    ...getRawSamplesTableBuilderWithEventDelay(),
     weight: newWeight,
-    threadId: newThreadId,
   };
 
   const samples1Time = computeTimeColumnForRawSamplesTable(samples1);
@@ -1104,7 +1217,6 @@ function combineSamplesDiffing(
       // of eventDelay/responsiveness don't mean anything.
       newSamples.eventDelay!.push(null);
       newSamples.time!.push(samples1Time[i]);
-      newThreadId.push(samples1.threadId ? samples1.threadId[i] : tid1);
       // TODO (issue #3151): Figure out a way to diff CPU usage numbers.
       // We add the first thread with a negative weight, because this is the
       // base profile.
@@ -1120,7 +1232,6 @@ function combineSamplesDiffing(
       // of eventDelay/responsiveness don't mean anything.
       newSamples.eventDelay!.push(null);
       newSamples.time!.push(samples2Time[j]);
-      newThreadId.push(samples2.threadId ? samples2.threadId[j] : tid2);
       const sampleWeight = samples2.weight ? samples2.weight[j] : 1;
       newWeight.push(weightMultiplier2 * sampleWeight);
 
@@ -1129,7 +1240,7 @@ function combineSamplesDiffing(
     }
   }
 
-  return newSamples;
+  return finishRawSamplesTableBuilder(newSamples);
 }
 
 type ThreadAndWeightMultiplier = {
@@ -1176,7 +1287,7 @@ function getComparisonThread(
     tid: 'Diff between 1 and 2',
     isMainThread: true,
     samples: newSamples,
-    markers: getEmptyRawMarkerTable(),
+    markers: finishRawMarkerTableBuilder(getRawMarkerTableBuilder()),
   };
 
   return mergedThread;
@@ -1244,22 +1355,37 @@ function combineSamplesForMerging(threads: RawThread[]): RawSamplesTable {
   const samplesPerThread: RawSamplesTable[] = threads.map(
     (thread) => thread.samples
   );
-  const sampleTimesPerThread: Milliseconds[][] = samplesPerThread.map(
-    computeTimeColumnForRawSamplesTable
-  );
+  const sampleTimesPerThread: Float64Array<ArrayBuffer>[] =
+    samplesPerThread.map(computeTimeColumnForRawSamplesTable);
   // This is the array that holds the latest processed sample index for each
   // thread's samplesTable.
   const nextSampleIndexPerThread: number[] = Array(
     samplesPerThread.length
   ).fill(0);
-  // This array will contain the source thread ids. It will be added to the
-  // samples table after the loop.
-  const newThreadId: Tid[] = [];
   // Creating a new empty samples table to fill.
   const newSamples = {
-    ...getEmptySamplesTableWithEventDelay(),
-    threadId: newThreadId,
+    ...getRawSamplesTableBuilderWithEventDelay(),
   };
+
+  // If every source thread has threadCPUDelta, and if the threads are
+  // non-overlapping in time, create a combined threadCPUDelta for the
+  // merged thread.
+  // For overlapping threads we drop threadCPUDelta entirely because the
+  // deltas are non-sensical if samples are interleaved.
+  const allHaveThreadCPUDelta = samplesPerThread.every(
+    (s) => s.threadCPUDelta !== undefined
+  );
+  const sortedThreadTimeRanges = sampleTimesPerThread
+    .filter((times) => times.length > 0)
+    .map((times) => ({ start: times[0], end: times[times.length - 1] }))
+    .sort((a, b) => a.start - b.start);
+  const threadsAreNonOverlapping = sortedThreadTimeRanges.every(
+    (range, i) => i === 0 || range.start >= sortedThreadTimeRanges[i - 1].end
+  );
+  const shouldCombineThreadCPUDelta =
+    allHaveThreadCPUDelta && threadsAreNonOverlapping;
+  const newThreadCPUDelta: Array<number | null> | undefined =
+    shouldCombineThreadCPUDelta ? [] : undefined;
 
   while (true) {
     let earliestNextSampleThreadIndex: number | null = null;
@@ -1305,17 +1431,25 @@ function combineSamplesForMerging(threads: RawThread[]): RawSamplesTable {
     // from independent threads instead.
     ensureExists(newSamples.eventDelay).push(null);
     newSamples.time!.push(sourceThreadSamplesTimeCol[sourceThreadSampleIndex]);
-    newThreadId.push(
-      sourceThreadSamples.threadId
-        ? sourceThreadSamples.threadId[sourceThreadSampleIndex]
-        : threads[sourceThreadIndex].tid
-    );
+    if (newThreadCPUDelta !== undefined) {
+      newThreadCPUDelta.push(
+        ensureExists(sourceThreadSamples.threadCPUDelta)[
+          sourceThreadSampleIndex
+        ]
+      );
+    }
 
     newSamples.length++;
     nextSampleIndexPerThread[sourceThreadIndex]++;
   }
 
-  return newSamples;
+  if (newThreadCPUDelta !== undefined) {
+    return finishRawSamplesTableBuilder({
+      ...newSamples,
+      threadCPUDelta: newThreadCPUDelta,
+    });
+  }
+  return finishRawSamplesTableBuilder(newSamples);
 }
 
 /**
@@ -1323,8 +1457,8 @@ function combineSamplesForMerging(threads: RawThread[]): RawSamplesTable {
  */
 function mergeMarkers(threads: RawThread[]): RawMarkerTable {
   const newThreadId: Array<Tid | null> = [];
-  const newMarkerTable: RawMarkerTable = {
-    ...getEmptyRawMarkerTable(),
+  const newMarkerTable: RawMarkerTableBuilder = {
+    ...getRawMarkerTableBuilder(),
     threadId: newThreadId,
   };
 
@@ -1345,20 +1479,23 @@ function mergeMarkers(threads: RawThread[]): RawMarkerTable {
     }
   });
 
-  return newMarkerTable;
+  return finishRawMarkerTableBuilder(newMarkerTable);
 }
 
 /**
  * Returns a RawMarkerTable which contains all the markers from targetThread,
- * as well as any CompositorScreenshot markers found on any other threads.
+ * as well as any screenshot markers found on any other threads.
  *
  * `targetThread` is expected to be one of the threads in `threads`.
  */
 function getThreadMarkersAndScreenshotMarkers(
   threads: RawThread[],
-  targetThread: RawThread
+  targetThread: RawThread,
+  screenshotMarkerTypes: Set<string>
 ): RawMarkerTable {
-  const targetMarkerTable = shallowCloneRawMarkerTable(targetThread.markers);
+  const targetMarkerTable = getRawMarkerTableBuilderFromExisting(
+    targetThread.markers
+  );
 
   // Find screenshot markers in the other threads and add them to the target thread.
   for (const thread of threads) {
@@ -1372,7 +1509,7 @@ function getThreadMarkersAndScreenshotMarkers(
 
     for (let markerIndex = 0; markerIndex < markers.length; markerIndex++) {
       const data = markers.data[markerIndex];
-      if (data === null || data.type !== 'CompositorScreenshot') {
+      if (data === null || !screenshotMarkerTypes.has(data.type)) {
         continue;
       }
       targetMarkerTable.data.push(data);
@@ -1392,5 +1529,237 @@ function getThreadMarkersAndScreenshotMarkers(
     }
   }
 
-  return targetMarkerTable;
+  return finishRawMarkerTableBuilder(targetMarkerTable);
+}
+
+/**
+ * First-fit interval coloring: partition `items` (sorted by start time) into
+ * subgroups such that within each subgroup no two items overlap.
+ */
+function partitionNonOverlapping<T>(
+  itemsSortedByStart: T[],
+  rangeOf: (item: T) => StartEndRange
+): T[][] {
+  const subgroups: { items: T[]; lastEnd: number }[] = [];
+  for (const item of itemsSortedByStart) {
+    const range = rangeOf(item);
+    let placed = false;
+    for (const sg of subgroups) {
+      if (sg.lastEnd <= range.start) {
+        sg.items.push(item);
+        sg.lastEnd = range.end;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      subgroups.push({ items: [item], lastEnd: range.end });
+    }
+  }
+  return subgroups.map((sg) => sg.items);
+}
+
+/**
+ * Remap the `mainThreadIndex` of counters and profilerOverhead entries
+ * according to `oldThreadIndexToNew`. Entries whose main thread is not in the
+ * map (i.e. has been removed) are dropped.
+ */
+export function remapCountersAndProfilerOverhead(
+  profile: Profile,
+  oldThreadIndexToNew: Map<ThreadIndex, ThreadIndex>
+): {
+  counters: RawCounter[] | undefined;
+  profilerOverhead: ProfilerOverhead[] | undefined;
+} {
+  return {
+    counters: profile.counters?.reduce<RawCounter[]>((acc, counter) => {
+      const newThreadIndex = oldThreadIndexToNew.get(counter.mainThreadIndex);
+      if (newThreadIndex !== undefined) {
+        acc.push({ ...counter, mainThreadIndex: newThreadIndex });
+      }
+      return acc;
+    }, []),
+    profilerOverhead: profile.profilerOverhead?.reduce<ProfilerOverhead[]>(
+      (acc, overhead) => {
+        const newThreadIndex = oldThreadIndexToNew.get(
+          overhead.mainThreadIndex
+        );
+        if (newThreadIndex !== undefined) {
+          acc.push({ ...overhead, mainThreadIndex: newThreadIndex });
+        }
+        return acc;
+      },
+      []
+    ),
+  };
+}
+
+/**
+ * Merges threads from sequential runs of the same logical workload.
+ *
+ * Two-stage approach:
+ *
+ *   1. Group processes (i.e. all threads sharing a pid) by (processName,
+ *      processType, mainThreadName) and partition each group into matched
+ *      bundles of non-overlapping processes via first-fit interval coloring.
+ *      Each non-singleton bundle represents one logical process whose
+ *      lifetime spans multiple runs.
+ *
+ *   2. Within each matched bundle, merge same-named threads across the
+ *      bundled processes. Same-named threads inside a single process are
+ *      not merged (they may overlap), so we again partition by non-overlap
+ *      before merging.
+ *
+ * Threads belonging to a singleton process bundle are passed through
+ * unchanged.
+ */
+export function mergeNonOverlappingThreadsByName(profile: Profile): Profile {
+  const interval = profile.meta.interval;
+  const threads = profile.threads;
+
+  const threadRanges = threads.map((t) => getTimeRangeForThread(t, interval));
+
+  type ProcessInfo = {
+    pid: Pid;
+    threadIndices: number[];
+    range: StartEndRange;
+    processName: string | undefined;
+    processType: string;
+    mainThreadName: string;
+  };
+
+  const processesByPid = new Map<Pid, ProcessInfo>();
+  for (let i = 0; i < threads.length; i++) {
+    const t = threads[i];
+    let proc = processesByPid.get(t.pid);
+    if (proc === undefined) {
+      proc = {
+        pid: t.pid,
+        threadIndices: [],
+        range: { start: Infinity, end: -Infinity },
+        processName: t.processName,
+        processType: t.processType,
+        mainThreadName: t.name,
+      };
+      processesByPid.set(t.pid, proc);
+    }
+    proc.threadIndices.push(i);
+    if (t.isMainThread) {
+      proc.mainThreadName = t.name;
+      if (t.processName !== undefined) {
+        proc.processName = t.processName;
+      }
+    }
+    const r = threadRanges[i];
+    if (r.start < proc.range.start) {
+      proc.range.start = r.start;
+    }
+    if (r.end > proc.range.end) {
+      proc.range.end = r.end;
+    }
+  }
+
+  const processGroups = new Map<string, ProcessInfo[]>();
+  for (const proc of processesByPid.values()) {
+    const key = `${proc.processName ?? ''}\u0000${proc.processType}\u0000${proc.mainThreadName}`;
+    let g = processGroups.get(key);
+    if (g === undefined) {
+      g = [];
+      processGroups.set(key, g);
+    }
+    g.push(proc);
+  }
+
+  const mergedIndexes = new Set<number>();
+  const mergeReplacements = new Map<number, RawThread>();
+  // For each old index that has been merged away (i.e. is in `mergedIndexes`),
+  // the old index of the surviving thread (`tb[0]`) it was merged into.
+  const mergedAwayToSurvivor = new Map<number, number>();
+
+  for (const procs of processGroups.values()) {
+    if (procs.length <= 1) {
+      continue;
+    }
+    procs.sort((a, b) => a.range.start - b.range.start);
+    const bundles = partitionNonOverlapping(procs, (p) => p.range);
+
+    for (const bundle of bundles) {
+      if (bundle.length <= 1) {
+        continue;
+      }
+
+      // Group threads in this bundle by name, partition each by non-overlap,
+      // and merge subgroups of size > 1.
+      const threadsByName = new Map<string, number[]>();
+      for (const proc of bundle) {
+        for (const tIdx of proc.threadIndices) {
+          const name = threads[tIdx].name;
+          let arr = threadsByName.get(name);
+          if (arr === undefined) {
+            arr = [];
+            threadsByName.set(name, arr);
+          }
+          arr.push(tIdx);
+        }
+      }
+
+      for (const tIndices of threadsByName.values()) {
+        if (tIndices.length <= 1) {
+          continue;
+        }
+        tIndices.sort((a, b) => threadRanges[a].start - threadRanges[b].start);
+        const tBundles = partitionNonOverlapping(
+          tIndices,
+          (i) => threadRanges[i]
+        );
+        for (const tb of tBundles) {
+          if (tb.length <= 1) {
+            continue;
+          }
+          const sourceThreads = tb.map((i) => threads[i]);
+          const original = sourceThreads[0];
+          const merged = mergeThreads(sourceThreads);
+          merged.name = original.name;
+          merged.pid = original.pid;
+          merged.tid = original.tid;
+          merged.processType = original.processType;
+          merged.processName = original.processName;
+          merged.isMainThread = original.isMainThread;
+
+          mergeReplacements.set(tb[0], merged);
+          for (let k = 1; k < tb.length; k++) {
+            mergedIndexes.add(tb[k]);
+            mergedAwayToSurvivor.set(tb[k], tb[0]);
+          }
+        }
+      }
+    }
+  }
+
+  if (mergeReplacements.size === 0) {
+    return profile;
+  }
+
+  const oldThreadIndexToNew = new Map<ThreadIndex, ThreadIndex>();
+  const newThreads: RawThread[] = [];
+  for (let i = 0; i < threads.length; i++) {
+    if (mergedIndexes.has(i)) {
+      continue;
+    }
+    oldThreadIndexToNew.set(i, newThreads.length);
+    const replacement = mergeReplacements.get(i);
+    newThreads.push(replacement ?? threads[i]);
+  }
+  for (const [removed, survivor] of mergedAwayToSurvivor) {
+    oldThreadIndexToNew.set(
+      removed,
+      ensureExists(oldThreadIndexToNew.get(survivor))
+    );
+  }
+
+  return {
+    ...profile,
+    threads: newThreads,
+    ...remapCountersAndProfilerOverhead(profile, oldThreadIndexToNew),
+  };
 }

@@ -1,0 +1,614 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+import {
+  formatThreadNetworkResult,
+  formatThreadInfoResult,
+  formatProfileInfoResult,
+} from '../../formatters';
+import type {
+  ThreadNetworkResult,
+  ThreadInfoResult,
+  ThreadNetworkSummary,
+  ProfileInfoResult,
+  ProfileNetworkSummary,
+  NetworkSummaryRequest,
+  NetworkRequestEntry,
+  NetworkPhaseTimings,
+  SessionContext,
+  WithContext,
+} from 'firefox-profiler/profile-query/types';
+
+function createContext(): SessionContext {
+  return {
+    selectedThreadHandle: 't-0',
+    selectedThreads: [
+      { threadIndex: 0, name: 'GeckoMain', processName: 'Parent Process' },
+    ],
+    resultThreadHandle: null,
+    resultThreads: [],
+    currentViewRange: null,
+    rootRange: { start: 0, end: 1000 },
+    callTreeSummaryStrategy: 'timing',
+  };
+}
+
+function makeRequest(
+  overrides: Partial<NetworkRequestEntry> = {}
+): NetworkRequestEntry {
+  return {
+    markerHandle: 'm-1',
+    url: 'https://example.com/resource',
+    startTime: 0,
+    duration: 100,
+    status: 'STATUS_STOP',
+    incomplete: false,
+    startedBeforeRecording: false,
+    phases: {},
+    ...overrides,
+  };
+}
+
+function makeSummary(
+  overrides: Partial<ThreadNetworkResult['summary']> = {}
+): ThreadNetworkResult['summary'] {
+  return {
+    cacheHit: 0,
+    cacheMiss: 0,
+    cacheUnknown: 1,
+    inFlightMs: 100,
+    inFlightPercentage: 10,
+    peakConcurrency: 1,
+    rangeDurationMs: 1000,
+    phaseTotals: {},
+    ...overrides,
+  };
+}
+
+function makeResult(
+  overrides: Partial<ThreadNetworkResult> = {}
+): WithContext<ThreadNetworkResult> {
+  return {
+    context: createContext(),
+    type: 'thread-network',
+    threadHandle: 't-0',
+    friendlyThreadName: 'GeckoMain',
+    totalRequestCount: 1,
+    incompleteCount: 0,
+    totalCandidateCount: 1,
+    filteredRequestCount: 1,
+    sort: 'duration',
+    summary: makeSummary(),
+    requests: [makeRequest()],
+    ...overrides,
+  };
+}
+
+describe('formatThreadNetworkResult', function () {
+  it('shows thread handle and request count', function () {
+    const result = makeResult({
+      filteredRequestCount: 3,
+      totalRequestCount: 3,
+    });
+    result.requests = [
+      makeRequest({ url: 'https://a.com' }),
+      makeRequest({ url: 'https://b.com' }),
+      makeRequest({ url: 'https://c.com' }),
+    ];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('t-0');
+    expect(output).toContain('3 requests');
+  });
+
+  it('shows "(filtered from N)" suffix when filter reduces count', function () {
+    const result = makeResult({
+      totalRequestCount: 10,
+      totalCandidateCount: 10,
+      filteredRequestCount: 3,
+      filters: { searchString: 'api' },
+    });
+    result.requests = [makeRequest()];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('(filtered from 10)');
+  });
+
+  it('shows "X of Y requests" in header when limit truncates results', function () {
+    const result = makeResult({
+      filteredRequestCount: 50,
+      totalRequestCount: 50,
+      totalCandidateCount: 50,
+    });
+    result.requests = [makeRequest(), makeRequest()]; // only 2 shown of 50
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('2 of 50 requests');
+  });
+
+  it('shows --limit 0 hint in footer when results are truncated', function () {
+    const result = makeResult({
+      filteredRequestCount: 50,
+      totalRequestCount: 50,
+      totalCandidateCount: 50,
+    });
+    result.requests = [makeRequest()];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('--limit 0');
+  });
+
+  it('shows normal filter hint in footer when results are not truncated', function () {
+    const result = makeResult({
+      filteredRequestCount: 1,
+      totalRequestCount: 1,
+    });
+    result.requests = [makeRequest()];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).not.toContain('--limit 0');
+    expect(output).toContain('--search');
+  });
+
+  it('does not show filtered suffix when counts are equal', function () {
+    const result = makeResult({
+      totalRequestCount: 2,
+      totalCandidateCount: 2,
+      filteredRequestCount: 2,
+      filters: { minDuration: 50 },
+    });
+    result.requests = [makeRequest(), makeRequest()];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).not.toContain('filtered from');
+  });
+
+  it('counts redirect and cancel legs in the "filtered from" total', function () {
+    // Regression test: redirect and cancel legs are counted by neither
+    // totalRequestCount (STATUS_STOP only) nor incompleteCount, so deriving
+    // the pre-filter total as totalRequestCount + incompleteCount reported a
+    // number *below* the number of requests shown ("114 requests (filtered
+    // from 104)"). totalCandidateCount is the real candidate set.
+    const result = makeResult({
+      totalRequestCount: 104, // completed
+      incompleteCount: 0,
+      totalCandidateCount: 114, // + 7 redirect + 3 cancel legs
+      filteredRequestCount: 114, // nothing was actually filtered out
+      filters: { limit: 0 },
+    });
+    result.requests = [makeRequest()];
+
+    const output = formatThreadNetworkResult(result);
+
+    // Nothing was filtered out, so no suffix at all — and in particular never
+    // a total smaller than the count it qualifies.
+    expect(output).not.toContain('filtered from');
+    expect(output).not.toContain('filtered from 104');
+  });
+
+  it('reports the candidate total, not the completed count, when filtering', function () {
+    const result = makeResult({
+      totalRequestCount: 104,
+      incompleteCount: 0,
+      totalCandidateCount: 114,
+      filteredRequestCount: 12,
+      filters: { searchString: 'api' },
+    });
+    result.requests = [makeRequest()];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('(filtered from 114)');
+    expect(output).not.toContain('(filtered from 104)');
+  });
+
+  it('never reports a filtered-from total below the shown count', function () {
+    const result = makeResult({
+      totalRequestCount: 104,
+      incompleteCount: 0,
+      totalCandidateCount: 114,
+      filteredRequestCount: 4,
+      filters: { limit: 0 },
+    });
+    result.requests = [makeRequest(), makeRequest()];
+
+    const output = formatThreadNetworkResult(result);
+    const headerLine = output
+      .split('\n')
+      .find((l) => l.includes('Network requests in thread'))!;
+    const match = /filtered from (\d+)/.exec(headerLine);
+    // The candidate set the filters ran against, not the smaller
+    // totalRequestCount, which would report a total below the shown count.
+    expect(match).not.toBeNull();
+    expect(Number(match![1])).toBe(114);
+  });
+
+  it('shows cache summary counts', function () {
+    const result = makeResult({
+      summary: makeSummary({ cacheHit: 4, cacheMiss: 2, cacheUnknown: 1 }),
+    });
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('4 hit');
+    expect(output).toContain('2 miss');
+    expect(output).toContain('1 unknown');
+  });
+
+  it('leads the summary with the wall-clock in-flight metric', function () {
+    const result = makeResult({
+      summary: makeSummary({
+        inFlightMs: 870,
+        inFlightPercentage: 87,
+        peakConcurrency: 14,
+        rangeDurationMs: 1000,
+      }),
+    });
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('In flight');
+    expect(output).toContain('87%');
+    expect(output).toContain('peak 14 concurrent');
+  });
+
+  it('shows phase totals section when any phase total is present', function () {
+    const phaseTotals: NetworkPhaseTimings = { ttfb: 50, download: 30 };
+    const result = makeResult({
+      summary: makeSummary({ cacheMiss: 1, cacheUnknown: 0, phaseTotals }),
+    });
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('Phase totals');
+    expect(output).toContain('TTFB');
+    expect(output).toContain('Download');
+  });
+
+  it('labels phase totals as summed across concurrent requests', function () {
+    const result = makeResult({
+      summary: makeSummary({ phaseTotals: { download: 30 } }),
+    });
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('summed across concurrent requests');
+  });
+
+  it('omits phase totals section when no phases are present', function () {
+    const result = makeResult({
+      summary: makeSummary({ cacheHit: 1, cacheUnknown: 0 }),
+    });
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).not.toContain('Phase totals');
+  });
+
+  it('shows each request URL', function () {
+    const result = makeResult({
+      filteredRequestCount: 2,
+      totalRequestCount: 2,
+    });
+    result.requests = [
+      makeRequest({ url: 'https://api.example.com/data' }),
+      makeRequest({ url: 'https://static.example.com/img.png' }),
+    ];
+    result.summary.cacheUnknown = 2;
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('https://api.example.com/data');
+    expect(output).toContain('https://static.example.com/img.png');
+  });
+
+  it('truncates URLs longer than 100 characters', function () {
+    const longUrl = 'https://example.com/' + 'a'.repeat(90);
+    const result = makeResult();
+    result.requests = [makeRequest({ url: longUrl })];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('...');
+    expect(output).not.toContain(longUrl);
+  });
+
+  it('shows per-request phases when present', function () {
+    const phases: NetworkPhaseTimings = { dns: 5, ttfb: 30 };
+    const result = makeResult();
+    result.requests = [makeRequest({ phases })];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('Phases:');
+    expect(output).toContain('DNS=');
+    expect(output).toContain('TTFB=');
+  });
+
+  it('omits phases line when request has no timing data', function () {
+    const result = makeResult();
+    result.requests = [makeRequest({ phases: {} })];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).not.toContain('Phases:');
+  });
+
+  it('shows HTTP status and version when present', function () {
+    const result = makeResult();
+    result.requests = [makeRequest({ httpStatus: 200, httpVersion: 'h2' })];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('200');
+    expect(output).toContain('h2');
+  });
+
+  it('shows ??? for missing HTTP status', function () {
+    const result = makeResult();
+    result.requests = [makeRequest()]; // no httpStatus
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('???');
+  });
+
+  it('shows "No network requests" message when requests list is empty', function () {
+    const result = makeResult({
+      totalRequestCount: 5,
+      filteredRequestCount: 0,
+      filters: { searchString: 'no-match' },
+    });
+    result.requests = [];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('No network requests');
+  });
+
+  it('shows a marker handle for each request', function () {
+    const result = makeResult();
+    result.requests = [makeRequest({ markerHandle: 'm-42' })];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('m-42');
+  });
+
+  it('reports incomplete requests', function () {
+    const result = makeResult({ incompleteCount: 2 });
+    result.requests = [makeRequest({ incomplete: true })];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('did not complete during the recording');
+    expect(output).toContain('in flight');
+  });
+
+  it('annotates requests that started before the recording', function () {
+    const result = makeResult();
+    result.requests = [
+      makeRequest({ httpStatus: 200, startedBeforeRecording: true }),
+    ];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('started before recording');
+    // Shows the real status, not "in flight".
+    expect(output).not.toContain('in flight');
+    expect(output).toContain('200');
+  });
+
+  it('reflects the sort order in the header', function () {
+    const durationResult = makeResult({ sort: 'duration' });
+    expect(formatThreadNetworkResult(durationResult)).toContain(
+      'slowest first'
+    );
+
+    const startResult = makeResult({ sort: 'start' });
+    expect(formatThreadNetworkResult(startResult)).toContain('chronological');
+  });
+
+  it('labels a redirect leg instead of showing "???"', function () {
+    const result = makeResult();
+    result.requests = [makeRequest({ status: 'STATUS_REDIRECT' })];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('redirect');
+    expect(output).not.toContain('???');
+  });
+
+  it('labels a canceled leg instead of showing "???"', function () {
+    const result = makeResult();
+    result.requests = [makeRequest({ status: 'STATUS_CANCEL' })];
+
+    const output = formatThreadNetworkResult(result);
+
+    expect(output).toContain('canceled');
+    expect(output).not.toContain('???');
+  });
+});
+
+function makeSummaryRequest(
+  overrides: Partial<NetworkSummaryRequest> = {}
+): NetworkSummaryRequest {
+  return {
+    markerHandle: 'm-1',
+    threadHandle: 't-0',
+    url: 'https://example.com/resource',
+    durationMs: 100,
+    startTime: 0,
+    status: 'STATUS_STOP',
+    incomplete: false,
+    startedBeforeRecording: false,
+    ...overrides,
+  };
+}
+
+function makeThreadInfoResult(
+  networkActivity: ThreadNetworkSummary | null
+): WithContext<ThreadInfoResult> {
+  return {
+    context: createContext(),
+    type: 'thread-info',
+    threadHandle: 't-0',
+    name: 'GeckoMain',
+    friendlyName: 'GeckoMain',
+    tid: 1,
+    createdAt: 0,
+    createdAtName: 'start',
+    endedAt: null,
+    endedAtName: null,
+    sampleCount: 0,
+    markerCount: 0,
+    cpuActivity: null,
+    networkActivity,
+    availableStrategies: ['timing'],
+  };
+}
+
+function makeThreadNetworkSummary(
+  slowest: NetworkSummaryRequest[]
+): ThreadNetworkSummary {
+  return {
+    threadHandle: 't-0',
+    threadName: 'GeckoMain',
+    requestCount: slowest.filter((r) => !r.incomplete).length,
+    incompleteCount: slowest.filter((r) => r.incomplete).length,
+    inFlightMs: 100,
+    inFlightPercentage: 10,
+    peakConcurrency: 1,
+    errorCount: 0,
+    cacheHit: 0,
+    cacheMiss: 0,
+    cacheUnknown: slowest.length,
+    rangeDurationMs: 1000,
+    slowest,
+  };
+}
+
+describe('formatThreadInfoResult network activity', function () {
+  it('annotates an in-flight request in the slowest list', function () {
+    const summary = makeThreadNetworkSummary([
+      makeSummaryRequest({ incomplete: true, durationMs: 999 }),
+    ]);
+
+    const output = formatThreadInfoResult(makeThreadInfoResult(summary));
+
+    expect(output).toContain('Slowest requests:');
+    expect(output).toContain('(in flight at end)');
+  });
+
+  it('does not annotate a completed request as in flight', function () {
+    const summary = makeThreadNetworkSummary([makeSummaryRequest()]);
+
+    const output = formatThreadInfoResult(makeThreadInfoResult(summary));
+
+    expect(output).toContain('Slowest requests:');
+    expect(output).not.toContain('(in flight at end)');
+  });
+
+  it('labels a redirect leg in the slowest list', function () {
+    const summary = makeThreadNetworkSummary([
+      makeSummaryRequest({ status: 'STATUS_REDIRECT' }),
+    ]);
+
+    const output = formatThreadInfoResult(makeThreadInfoResult(summary));
+
+    expect(output).toContain('(redirect)');
+  });
+
+  it('labels a canceled leg in the slowest list', function () {
+    const summary = makeThreadNetworkSummary([
+      makeSummaryRequest({ status: 'STATUS_CANCEL' }),
+    ]);
+
+    const output = formatThreadInfoResult(makeThreadInfoResult(summary));
+
+    expect(output).toContain('(canceled)');
+  });
+
+  it('does not label a completed request with a status suffix', function () {
+    const summary = makeThreadNetworkSummary([makeSummaryRequest()]);
+
+    const output = formatThreadInfoResult(makeThreadInfoResult(summary));
+
+    expect(output).not.toContain('(redirect)');
+    expect(output).not.toContain('(canceled)');
+  });
+});
+
+describe('formatProfileInfoResult network by-thread breakdown', function () {
+  function makeProfileInfoResult(
+    networkActivity: ProfileNetworkSummary
+  ): WithContext<ProfileInfoResult> {
+    return {
+      context: createContext(),
+      type: 'profile-info',
+      name: 'test',
+      platform: 'macOS',
+      threadCount: 1,
+      processCount: 1,
+      processes: [
+        {
+          processIndex: 0,
+          pid: '1',
+          name: 'Parent Process',
+          cpuMs: 10,
+          threads: [
+            {
+              threadIndex: 0,
+              threadHandle: 't-0',
+              name: 'GeckoMain',
+              tid: 1,
+              cpuMs: 10,
+            },
+          ],
+        },
+      ],
+      cpuActivity: null,
+      networkActivity,
+    };
+  }
+
+  // The per-thread requestCount counts started requests -- completed and
+  // in-flight legs -- but not redirect/cancel legs, so on a thread with those it
+  // is lower than the candidate total `thread network` reports for the same
+  // thread. The label has to say so, or the two commands silently disagree
+  // (104 vs 114).
+  it('labels the per-thread count as started requests', function () {
+    const output = formatProfileInfoResult(
+      makeProfileInfoResult({
+        requestCount: 104,
+        incompleteCount: 0,
+        inFlightMs: 100,
+        inFlightPercentage: 10,
+        peakConcurrency: 3,
+        errorCount: 0,
+        rangeDurationMs: 1000,
+        slowest: [],
+        byThread: [
+          {
+            threadHandle: 't-0',
+            threadName: 'Parent Process',
+            requestCount: 104,
+            inFlightMs: 100,
+          },
+        ],
+      })
+    );
+
+    expect(output).toContain('By thread:');
+    expect(output).toContain('104 started reqs');
+    // A bare "104 reqs" would read as the thread's total request count.
+    expect(output).not.toMatch(/\(104 reqs/);
+  });
+});

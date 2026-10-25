@@ -18,17 +18,19 @@ import {
   getSampleIndexClosestToStartTime,
   getSampleIndexToCallNodeIndex,
   getTreeOrderComparator,
-  getSamplesSelectedStates,
+  getSampleRelationsToNode,
+  SampleRelations,
   extractProfileFilterPageData,
   findAddressProofForFile,
   calculateFunctionSizeLowerBound,
+  computeFrameTableFromRawFrameTable,
+  computeNativeSymbolTableFromRawNativeSymbolTable,
   getNativeSymbolsForCallNode,
   getNativeSymbolInfo,
   computeTimeColumnForRawSamplesTable,
   getCallNodeFramePerStack,
   getTotalNativeSymbolTimingsForCallNode,
 } from '../../profile-logic/profile-data';
-import { resourceTypes } from '../../profile-logic/data-structures';
 import {
   createGeckoProfile,
   createGeckoProfileWithJsTimings,
@@ -63,6 +65,13 @@ import type {
   IndexIntoSourceTable,
   IndexIntoCategoryList,
   IndexIntoNativeSymbolTable,
+} from 'firefox-profiler/types';
+import {
+  SampleRelationToNode,
+  FillBucket,
+  ResourceType,
+  FrameFlag,
+  FuncFlag,
 } from 'firefox-profiler/types';
 
 describe('string-table', function () {
@@ -274,13 +283,13 @@ describe('process-profile', function () {
       expect(shared.frameTable.func[22]).toEqual(2);
       expect(shared.frameTable.func[24]).toEqual(1);
       expect(shared.frameTable.func[25]).toEqual(1);
-      expect(shared.frameTable.address[0]).toEqual(-1);
+      expect(shared.frameTable.flags[0] & FrameFlag.HasAddress).toBe(0);
       // The next two addresses were return addresses which were "nudged"
       // by one byte to point into the calling instruction.
       expect(shared.frameTable.address[1]).toEqual(0xf83);
       expect(shared.frameTable.address[2]).toEqual(0x1a44);
-      expect(shared.frameTable.address[3]).toEqual(-1);
-      expect(shared.frameTable.address[4]).toEqual(-1);
+      expect(shared.frameTable.flags[3] & FrameFlag.HasAddress).toBe(0);
+      expect(shared.frameTable.flags[4] & FrameFlag.HasAddress).toBe(0);
       expect(shared.frameTable.address[5]).toEqual(0x1bcd);
       expect(shared.frameTable.address[6]).toEqual(0x1bce);
       // Here are the non-nudged addresses for when they were sampled directly.
@@ -288,7 +297,8 @@ describe('process-profile', function () {
       expect(shared.frameTable.address[22]).toEqual(0x1a45);
       expect(shared.frameTable.address[24]).toEqual(0xf84);
       expect(shared.frameTable.address[25]).toEqual(0xf84);
-      const funcTableNames = shared.funcTable.name.map(
+      const funcTableNames = Array.from(
+        shared.funcTable.name,
         (nameIndex) => shared.stringArray[nameIndex]
       );
       expect(funcTableNames[0]).toEqual('(root)');
@@ -315,10 +325,14 @@ describe('process-profile', function () {
         const addresses = [];
         let stack = thread.samples.stack[sample];
         while (stack !== null) {
+          const frame = shared.stackTable.frame[stack];
           addresses.push(
-            shared.frameTable.address[shared.stackTable.frame[stack]]
+            (shared.frameTable.flags[frame] & FrameFlag.HasAddress) !== 0
+              ? shared.frameTable.address[frame]
+              : -1
           );
-          stack = shared.stackTable.prefix[stack];
+          const offset = shared.stackTable.prefixOffset[stack];
+          stack = offset === 0 ? null : stack - offset;
         }
         addresses.reverse();
         return addresses;
@@ -334,18 +348,24 @@ describe('process-profile', function () {
       expect(shared.frameTable.length).toEqual(27);
       expect('nativeSymbol' in shared.frameTable).toBeTruthy();
       expect(shared.nativeSymbols.length).toEqual(0);
-      expect(
-        shared.frameTable.nativeSymbol.every((s) => s === null)
-      ).toBeTrue();
+      const flags = shared.frameTable.flags;
+      let allUnset = true;
+      for (let i = 0; i < shared.frameTable.length; i++) {
+        if ((flags[i] & FrameFlag.HasNativeSymbol) !== 0) {
+          allUnset = false;
+          break;
+        }
+      }
+      expect(allUnset).toBeTrue();
     });
 
     it('should create one resource per used library', function () {
       const shared = profile.shared;
       expect(shared.resourceTable.length).toEqual(4);
-      expect(shared.resourceTable.type[0]).toEqual(resourceTypes.addon);
-      expect(shared.resourceTable.type[1]).toEqual(resourceTypes.library);
-      expect(shared.resourceTable.type[2]).toEqual(resourceTypes.url);
-      expect(shared.resourceTable.type[3]).toEqual(resourceTypes.library);
+      expect(shared.resourceTable.type[0]).toEqual(ResourceType.Addon);
+      expect(shared.resourceTable.type[1]).toEqual(ResourceType.Library);
+      expect(shared.resourceTable.type[2]).toEqual(ResourceType.Url);
+      expect(shared.resourceTable.type[3]).toEqual(ResourceType.Library);
       const [name0, name1, name2, name3] = shared.resourceTable.name;
       expect(shared.stringArray[name0]).toEqual(
         'Extension "Form Autofill" (ID: formautofill@mozilla.org)'
@@ -515,17 +535,14 @@ describe('profile-data', function () {
     });
   });
 
-  function _getStackList(
-    thread: Thread,
-    stackIndex: IndexIntoStackTable | null
-  ) {
-    if (typeof stackIndex !== 'number') {
+  function _getStackList(thread: Thread, stackIndex: IndexIntoStackTable) {
+    if (typeof stackIndex !== 'number' || stackIndex === -1) {
       throw new Error('stackIndex must be a number');
     }
     const { prefix } = thread.stackTable;
     const stackList = [];
-    let nextStack: IndexIntoStackTable | null = stackIndex;
-    while (nextStack !== null) {
+    let nextStack: IndexIntoStackTable = stackIndex;
+    while (nextStack !== -1) {
       if (typeof nextStack !== 'number') {
         throw new Error('nextStack must be a number');
       }
@@ -886,7 +903,7 @@ describe('filter-by-implementation', function () {
     }
     const frameIndex = filteredThread.stackTable.frame[stackIndex];
     const funcIndex = filteredThread.frameTable.func[frameIndex];
-    return filteredThread.funcTable.isJS[funcIndex];
+    return (filteredThread.funcTable.flags[funcIndex] & FuncFlag.IsJS) !== 0;
   }
 
   it('will return the same thread if filtering to "all"', function () {
@@ -999,7 +1016,57 @@ describe('funcHasDirectRecursiveCall and funcHasRecursiveCall', function () {
   });
 });
 
-describe('getSamplesSelectedStates', function () {
+describe('SampleRelations', function () {
+  // SampleRelations.fillBucket recovers a relation's fill bucket with a single
+  // mask rather than a lookup table, which only works as long as every
+  // SampleRelationToNode is laid out as its FillBucket plus flag bits above
+  // it. Pin that layout down here, so that adding a relation which breaks it
+  // fails loudly instead of silently drawing samples into the wrong fill.
+  const expectedBuckets: Array<[SampleRelationToNode, FillBucket]> = [
+    [SampleRelationToNode.FilteredOut, FillBucket.FilteredOutByTransform],
+    [SampleRelationToNode.TotalButNotSelf, FillBucket.Selected],
+    [SampleRelationToNode.TotalAndSelf, FillBucket.Selected],
+    [SampleRelationToNode.Before, FillBucket.UnselectedOrderedBeforeSelected],
+    [SampleRelationToNode.After, FillBucket.UnselectedOrderedAfterSelected],
+  ];
+
+  const relations = new SampleRelations(
+    new Uint8Array(expectedBuckets.map(([relation]) => relation))
+  );
+
+  it('maps every relation to the right fill bucket', function () {
+    expect(expectedBuckets.map((_, i) => relations.fillBucket(i))).toEqual(
+      expectedBuckets.map(([, bucket]) => bucket)
+    );
+  });
+
+  it('round-trips every relation through get', function () {
+    expect(relations.toArrayForTesting()).toEqual(
+      expectedBuckets.map(([relation]) => relation)
+    );
+    expect(expectedBuckets.map((_, i) => relations.get(i))).toEqual(
+      expectedBuckets.map(([relation]) => relation)
+    );
+  });
+
+  it('treats only FilteredOut as filtered out', function () {
+    expect(expectedBuckets.map((_, i) => relations.isFilteredOut(i))).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  it('counts both self and non-self samples towards the total', function () {
+    expect(
+      expectedBuckets.map((_, i) => relations.contributesToTotal(i))
+    ).toEqual([false, true, true, false, false]);
+  });
+});
+
+describe('getSampleRelationsToNode', function () {
   function setup(textSamples: string) {
     const {
       derivedThreads,
@@ -1049,40 +1116,56 @@ describe('getSamplesSelectedStates', function () {
 
     it('determines the selection status of all the samples', function () {
       expect(
-        getSamplesSelectedStates(callNodeInfo, sampleCallNodes, A_B)
+        getSampleRelationsToNode(
+          callNodeInfo,
+          sampleCallNodes,
+          A_B
+        ).toArrayForTesting()
       ).toEqual([
-        'SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.After,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.After,
+        SampleRelationToNode.After,
       ]);
       expect(
-        getSamplesSelectedStates(callNodeInfo, sampleCallNodes, A_D)
+        getSampleRelationsToNode(
+          callNodeInfo,
+          sampleCallNodes,
+          A_D
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.TotalAndSelf,
       ]);
       expect(
-        getSamplesSelectedStates(callNodeInfo, sampleCallNodes, A_B_F)
+        getSampleRelationsToNode(
+          callNodeInfo,
+          sampleCallNodes,
+          A_B_F
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.After,
+        SampleRelationToNode.TotalAndSelf,
+        SampleRelationToNode.After,
+        SampleRelationToNode.After,
       ]);
       expect(
-        getSamplesSelectedStates(callNodeInfo, sampleCallNodes, A_D_E)
+        getSampleRelationsToNode(
+          callNodeInfo,
+          sampleCallNodes,
+          A_D_E
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalAndSelf,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.After,
+        SampleRelationToNode.Before,
       ]);
     });
 
@@ -1145,41 +1228,53 @@ describe('getSamplesSelectedStates', function () {
       // Test B <- A <- ...
       // Only samples 2 and 6 have stacks ending in ... -> A -> B
       expect(
-        getSamplesSelectedStates(callNodeInfoInverted, sampleCallNodes, inBA)
+        getSampleRelationsToNode(
+          callNodeInfoInverted,
+          sampleCallNodes,
+          inBA
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.After,
+        SampleRelationToNode.After,
+        SampleRelationToNode.TotalButNotSelf,
       ]);
       // Test C <- B <- A <- ...
       // Only sample 5 has a stack ending in ... -> A -> B -> C
       expect(
-        getSamplesSelectedStates(callNodeInfoInverted, sampleCallNodes, inCBA)
+        getSampleRelationsToNode(
+          callNodeInfoInverted,
+          sampleCallNodes,
+          inCBA
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.Before,
       ]);
       // Test B <- ...
       // Only samples 2 and 6 have stacks ending in ... -> B
       expect(
-        getSamplesSelectedStates(callNodeInfoInverted, sampleCallNodes, inB)
+        getSampleRelationsToNode(
+          callNodeInfoInverted,
+          sampleCallNodes,
+          inB
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalAndSelf,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.After,
+        SampleRelationToNode.After,
+        SampleRelationToNode.TotalAndSelf,
       ]);
     });
 
@@ -1451,6 +1546,25 @@ describe('findAddressProofForFile', function () {
     );
     expect(missingAddressProof).toBeNull();
   });
+
+  it('finds an address for a file whose first frame has none', function () {
+    const { profile } = getProfileFromTextSamples(`
+      A[lib:XUL][file:a.cpp]
+      B[lib:XUL][file:a.cpp][address:20]
+    `);
+    const stringTable = StringTable.withBackingArray(
+      profile.shared.stringArray
+    );
+    const sourceIndex = profile.shared.sources.filename.indexOf(
+      stringTable.indexForString('a.cpp')
+    );
+
+    expect(findAddressProofForFile(profile, sourceIndex)).toEqual({
+      debugName: 'XUL',
+      breakpadId: 'SOMETHING_FAKE',
+      address: 0x20,
+    });
+  });
 });
 
 describe('calculateFunctionSizeLowerBound', function () {
@@ -1466,7 +1580,10 @@ describe('calculateFunctionSizeLowerBound', function () {
     const nativeSymbolIndex = nativeSymbolsDict.symSomeFunc;
 
     const functionSizeLowerBound = calculateFunctionSizeLowerBound(
-      shared.frameTable,
+      computeFrameTableFromRawFrameTable(
+        shared.frameTable,
+        profile.meta.categories
+      ),
       0x1000,
       nativeSymbolIndex
     );
@@ -1760,14 +1877,16 @@ describe('getNativeSymbolInfo', function () {
     const { shared } = profile;
     const stringTable = StringTable.withBackingArray(shared.stringArray);
     const { symSomeFunc, symOtherFunc } = nativeSymbolsDictPerThread[0];
+    const frameTable = computeFrameTableFromRawFrameTable(
+      shared.frameTable,
+      profile.meta.categories
+    );
+    const nativeSymbols = computeNativeSymbolTableFromRawNativeSymbolTable(
+      shared.nativeSymbols
+    );
 
     expect(
-      getNativeSymbolInfo(
-        symSomeFunc,
-        shared.nativeSymbols,
-        shared.frameTable,
-        stringTable
-      )
+      getNativeSymbolInfo(symSomeFunc, nativeSymbols, frameTable, stringTable)
     ).toEqual({
       name: 'symSomeFunc',
       address: 0x1000,
@@ -1776,12 +1895,7 @@ describe('getNativeSymbolInfo', function () {
       libIndex: profile.libs.findIndex((l) => l.name === 'XUL'),
     });
     expect(
-      getNativeSymbolInfo(
-        symOtherFunc,
-        shared.nativeSymbols,
-        shared.frameTable,
-        stringTable
-      )
+      getNativeSymbolInfo(symOtherFunc, nativeSymbols, frameTable, stringTable)
     ).toEqual({
       name: 'symOtherFunc',
       address: 0x2000,

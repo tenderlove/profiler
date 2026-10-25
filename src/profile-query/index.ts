@@ -1,0 +1,1849 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/*
+ * This implements a library for querying the contents of a profile.
+ *
+ * To use it it first needs to be built:
+ *   yarn build-profile-query
+ *
+ * Then it can be used from an interactive node session:
+ *
+ * % node
+ * > const { ProfileQuerier } = (await import('./dist/profile-query.js')).default;
+ * undefined
+ * > const p1 = await ProfileQuerier.load("/Users/mstange/Downloads/merged-profile.json.gz");
+ * > const p2 = await ProfileQuerier.load("https://profiler.firefox.com/from-url/http%3A%2F%2Fexample.com%2Fprofile.json/");
+ * > const p3 = await ProfileQuerier.load("https://share.firefox.dev/4oLEjCw");
+ */
+
+import * as fs from 'fs';
+
+import {
+  getProfile,
+  getProfileRootRange,
+  getSourcesWithSourceMaps,
+  getSourceTable,
+} from 'firefox-profiler/selectors/profile';
+import {
+  getAllCommittedRanges,
+  getIncludeIdleSamples,
+  getSelectedThreadIndexes,
+  getTransformStack,
+  getCurrentSearchString,
+  getLastSelectedCallTreeSummaryStrategy,
+  getProfileSpecificState,
+  getSymbolServerUrl,
+  getDataSource,
+  getUrlState,
+} from 'firefox-profiler/selectors/url-state';
+import { urlFromState } from 'firefox-profiler/app-logic/url-handling';
+import { shortenUrl } from 'firefox-profiler/utils/shorten-url';
+import {
+  commitRange,
+  popCommittedRanges,
+  changeSelectedThreads,
+  changeCallTreeSearchString,
+  changeCallTreeSummaryStrategy,
+  changeIncludeIdleSamples,
+  popTransformsFromStackForThreads,
+} from '../actions/profile-view';
+import { getThreadSelectors } from 'firefox-profiler/selectors/per-thread';
+import { TimestampManager } from './timestamps';
+import { ThreadMap } from './thread-map';
+import { getFriendlyProcessName } from './process-thread-list';
+import { parseFunctionHandle } from './function-map';
+import { getSourceHandle, parseSourceHandle } from './source-handle';
+import {
+  runSourceMapSymbolicationNode,
+  toSourceMapLocation,
+} from './source-map';
+import {
+  applySourceMapFile,
+  type ApplySourceMapFileResult,
+} from 'firefox-profiler/actions/source-map-symbolication';
+import {
+  basename,
+  type EligibleSource,
+} from 'firefox-profiler/profile-logic/source-maps/matching';
+import { assertExhaustiveCheck } from 'firefox-profiler/utils/types';
+import { encodeProfileForFilename } from 'firefox-profiler/profile-logic/profile-file-encoding';
+import {
+  getFilenameString,
+  getCheckedSharingOptions,
+  getSanitizedProfile,
+} from 'firefox-profiler/selectors/publish';
+import { updateSharingOption } from 'firefox-profiler/actions/publish';
+import * as path from 'path';
+import { getAnyLibForFunc, getLibNameForFunc } from './function-list';
+import {
+  MarkerMap,
+  expandMarkerHandleSpecsDetailed,
+  type MarkerId,
+} from './marker-map';
+import { loadProfileFromFileOrUrl, type LoadOptions } from './loader';
+import { collectProfileInfo } from './formatters/profile-info';
+import { collectProfileMeta } from './formatters/profile-meta';
+import {
+  collectThreadInfo,
+  collectThreadList,
+  collectThreadSamples,
+  collectThreadSamplesTopDown,
+  collectThreadSamplesBottomUp,
+  collectThreadFunctions,
+} from './formatters/thread-info';
+import { collectFunctionCategoryBreakdowns } from './formatters/category-breakdown';
+import {
+  collectThreadMarkers,
+  collectThreadNetwork,
+  collectMarkerStack,
+  collectMarkerInfo,
+  collectProfileLogs,
+  collectProfileMarkers,
+} from './formatters/marker-info';
+import { collectThreadPageLoad } from './formatters/page-load';
+import {
+  collectCounterList,
+  collectCounterInfo,
+} from './formatters/counter-info';
+import { parseTimeValue } from './time-range-parser';
+import { describeTransformGroup, pushSpecTransforms } from './filter-stack';
+import { functionAnnotate as computeFunctionAnnotate } from './function-annotate';
+import { withCallTreeSummaryStrategy } from './call-tree-strategy';
+import type {
+  IndexIntoSourceTable,
+  StartEndRange,
+  ThreadIndex,
+  ThreadsKey,
+  UrlState,
+} from 'firefox-profiler/types';
+import type {
+  StatusResult,
+  PermalinkResult,
+  PermalinkView,
+  SessionContext,
+  ContextThreadInfo,
+  WithContext,
+  FunctionExpandResult,
+  FunctionInfoResult,
+  FunctionAnnotateResult,
+  AnnotateMode,
+  ViewRangeResult,
+  ThreadSelectResult,
+  StrategySelectResult,
+  CallTreeSummaryStrategy,
+  ThreadInfoResult,
+  ThreadListOptions,
+  ThreadListResult,
+  MarkerStackResult,
+  MarkerInfoResult,
+  MarkerInfoMultiResult,
+  ProfileInfoResult,
+  ProfileMetaResult,
+  ThreadSamplesResult,
+  ThreadSamplesTopDownResult,
+  ThreadSamplesBottomUpResult,
+  ThreadMarkersResult,
+  ThreadNetworkResult,
+  NetworkRequestSort,
+  ThreadFunctionsResult,
+  ThreadPageLoadResult,
+  ProfileLogsResult,
+  ProfileMarkersResult,
+  CounterListResult,
+  CounterInfoResult,
+  SourceMapSourcesResult,
+  SourceEntry,
+  ApplySourceMapResult,
+  MarkerFilterOptions,
+  FunctionFilterOptions,
+  SampleFilterSpec,
+  FilterStackResult,
+  FilterEntry,
+  ProfileSaveResult,
+} from './types';
+import type { CallTreeCollectionOptions } from './formatters/call-tree';
+
+import {
+  getThreadsKey,
+  computeFuncTableFromRawFuncTable,
+} from 'firefox-profiler/profile-logic/profile-data';
+import { FuncFlag } from 'firefox-profiler/types';
+import type { Store } from '../types/store';
+
+function toSourceEntry(source: EligibleSource): SourceEntry {
+  return {
+    sourceHandle: getSourceHandle(source.sourceIndex),
+    sourceIndex: source.sourceIndex,
+    filename: source.filename,
+    sourceMap: toSourceMapLocation(source.sourceMapURL),
+  };
+}
+
+const PROFILER_FRONTEND_ORIGIN = 'https://profiler.firefox.com';
+
+/**
+ * Per-query settings that only exist as Redux state, so they are applied by
+ * changing that state around a computation and restoring it afterwards. Any
+ * field left unset keeps the session's value.
+ */
+type EphemeralViewOptions = {
+  includeIdle?: boolean;
+  callTreeSearch?: string;
+  sampleFilters?: SampleFilterSpec[];
+  strategy?: CallTreeSummaryStrategy;
+};
+
+export class ProfileQuerier {
+  _store: Store;
+  _processIndexMap: Map<string, number>;
+  _timestampManager: TimestampManager;
+  _threadMap: ThreadMap;
+  _markerMap: MarkerMap;
+  _archiveCache: Map<string, Promise<Uint8Array>>;
+  /**
+   * Per-thread sizes of each filter "push group". One `filter push` adds one
+   * entry whose value is the number of Redux transforms it dispatched (e.g.
+   * `--merge f-1,f-2` -> 2). `filter pop N` removes N groups, popping the
+   * matching count of Redux transforms. Transforms that were already in the
+   * Redux stack when the querier was constructed (URL-loaded, etc.) are
+   * seeded as individual size-1 groups so they remain poppable.
+   *
+   * FIXME: Add a MergeSet transform so multiple functions can be merged in a
+   * single group entry rather than dispatching one transform per function.
+   */
+  _pushGroupSizes: Map<ThreadsKey, number[]>;
+
+  constructor(store: Store, rootRange: StartEndRange) {
+    this._store = store;
+    this._processIndexMap = new Map();
+    this._timestampManager = new TimestampManager(rootRange);
+    this._threadMap = new ThreadMap();
+    this._archiveCache = new Map();
+    this._pushGroupSizes = new Map();
+
+    // Build process index map
+    const state = this._store.getState();
+    const profile = getProfile(state);
+    this._markerMap = new MarkerMap();
+    const uniquePids = Array.from(new Set(profile.threads.map((t) => t.pid)));
+    uniquePids.forEach((pid, index) => {
+      this._processIndexMap.set(pid, index);
+    });
+
+    // Seed thread handles eagerly so they are available immediately after load.
+    profile.threads.forEach((_, index) => {
+      this._threadMap.handleForThreadIndex(index);
+    });
+
+    // Seed push-group sizes from any transforms already in the Redux stack
+    // (typically loaded from a profiler.firefox.com URL). Each such transform
+    // becomes its own size-1 group so it remains individually poppable.
+    const transformsPerThread = getProfileSpecificState(state).transforms;
+    for (const [rawKey, stack] of Object.entries(transformsPerThread)) {
+      if (stack.length === 0) {
+        continue;
+      }
+      const threadsKey: ThreadsKey = /^-?\d+$/.test(rawKey)
+        ? Number(rawKey)
+        : rawKey;
+      this._pushGroupSizes.set(
+        threadsKey,
+        Array.from({ length: stack.length }, () => 1)
+      );
+    }
+  }
+
+  /**
+   * Ensure `_pushGroupSizes[threadsKey]` matches the Redux stack length by
+   * prepending size-1 groups for any transforms we haven't accounted for.
+   * Guards against external stack mutations between operations.
+   */
+  private _syncPushGroups(threadsKey: ThreadsKey): number[] {
+    let groups = this._pushGroupSizes.get(threadsKey);
+    if (groups === undefined) {
+      groups = [];
+      this._pushGroupSizes.set(threadsKey, groups);
+    }
+    const stackLength = getTransformStack(
+      this._store.getState(),
+      threadsKey
+    ).length;
+    const sum = groups.reduce((a, b) => a + b, 0);
+    if (sum < stackLength) {
+      for (let i = 0; i < stackLength - sum; i++) {
+        groups.unshift(1);
+      }
+    }
+    return groups;
+  }
+
+  static async load(
+    filePathOrUrl: string,
+    options: LoadOptions = {}
+  ): Promise<ProfileQuerier> {
+    const { store, rootRange } = await loadProfileFromFileOrUrl(
+      filePathOrUrl,
+      options
+    );
+    return new ProfileQuerier(store, rootRange);
+  }
+
+  async profileInfo(
+    showAll: boolean = false,
+    search?: string
+  ): Promise<WithContext<ProfileInfoResult>> {
+    const result = collectProfileInfo(
+      this._store,
+      this._timestampManager,
+      this._threadMap,
+      this._markerMap,
+      this._processIndexMap,
+      showAll,
+      search
+    );
+    return { ...result, context: this._getContext() };
+  }
+
+  async profileMeta(): Promise<WithContext<ProfileMetaResult>> {
+    return { ...collectProfileMeta(this._store), context: this._getContext() };
+  }
+
+  async counterList(): Promise<WithContext<CounterListResult>> {
+    const result = collectCounterList(
+      this._store,
+      this._threadMap,
+      this._processIndexMap
+    );
+    return { ...result, context: this._getContext() };
+  }
+
+  async counterInfo(
+    counterHandle: string
+  ): Promise<WithContext<CounterInfoResult>> {
+    const result = collectCounterInfo(
+      this._store,
+      this._threadMap,
+      this._processIndexMap,
+      this._timestampManager,
+      counterHandle
+    );
+    return { ...result, context: this._getContext() };
+  }
+
+  async threadList(
+    options?: ThreadListOptions
+  ): Promise<WithContext<ThreadListResult>> {
+    const result = collectThreadList(
+      this._store,
+      this._threadMap,
+      this._processIndexMap,
+      options
+    );
+    return { ...result, context: this._getContext() };
+  }
+
+  async threadInfo(
+    threadHandle?: string
+  ): Promise<WithContext<ThreadInfoResult>> {
+    const result = await collectThreadInfo(
+      this._store,
+      this._timestampManager,
+      this._threadMap,
+      this._markerMap,
+      threadHandle
+    );
+    return {
+      ...result,
+      context: this._getContextForThreadHandle(threadHandle),
+    };
+  }
+
+  async threadSamples(
+    threadHandle?: string,
+    includeIdle: boolean = false,
+    search?: string,
+    sampleFilters?: SampleFilterSpec[],
+    strategy?: CallTreeSummaryStrategy
+  ): Promise<WithContext<ThreadSamplesResult>> {
+    return this._runWithSampleFilters(
+      threadHandle,
+      includeIdle,
+      search,
+      sampleFilters,
+      strategy,
+      () => collectThreadSamples(this._store, this._threadMap, threadHandle)
+    );
+  }
+
+  async threadSamplesTopDown(
+    threadHandle?: string,
+    callTreeOptions?: CallTreeCollectionOptions,
+    includeIdle: boolean = false,
+    search?: string,
+    sampleFilters?: SampleFilterSpec[],
+    strategy?: CallTreeSummaryStrategy
+  ): Promise<WithContext<ThreadSamplesTopDownResult>> {
+    return this._runWithSampleFilters(
+      threadHandle,
+      includeIdle,
+      search,
+      sampleFilters,
+      strategy,
+      () =>
+        collectThreadSamplesTopDown(
+          this._store,
+          this._threadMap,
+          threadHandle,
+          callTreeOptions
+        )
+    );
+  }
+
+  async threadSamplesBottomUp(
+    threadHandle?: string,
+    callTreeOptions?: CallTreeCollectionOptions,
+    includeIdle: boolean = false,
+    search?: string,
+    sampleFilters?: SampleFilterSpec[],
+    strategy?: CallTreeSummaryStrategy
+  ): Promise<WithContext<ThreadSamplesBottomUpResult>> {
+    return this._runWithSampleFilters(
+      threadHandle,
+      includeIdle,
+      search,
+      sampleFilters,
+      strategy,
+      () =>
+        collectThreadSamplesBottomUp(
+          this._store,
+          this._threadMap,
+          threadHandle,
+          callTreeOptions
+        )
+    );
+  }
+
+  /**
+   * Push a view range selection (commit a range).
+   * Supports multiple formats:
+   * - Marker handle: "m-1" (uses marker's start/end times)
+   * - Timestamp names: "ts-6,ts-7"
+   * - Seconds: "2.7,3.1" (default if no suffix)
+   * - Milliseconds: "2700ms,3100ms"
+   * - Percentage: "10%,20%"
+   */
+  async pushViewRange(rangeName: string): Promise<ViewRangeResult> {
+    const state = this._store.getState();
+    const rootRange = getProfileRootRange(state);
+    const zeroAt = rootRange.start;
+
+    let startTimestamp: number;
+    let endTimestamp: number;
+    let markerInfo: ViewRangeResult['markerInfo'] = undefined;
+
+    // Check if it's a marker handle (e.g., "m-1")
+    if (rangeName.startsWith('m-') && !rangeName.includes(',')) {
+      // Look up the marker
+      const { threadIndexes, markerIndex } =
+        this._markerMap.markerForHandle(rangeName);
+      const threadSelectors = getThreadSelectors(threadIndexes);
+      const fullMarkerList = threadSelectors.getFullMarkerList(state);
+      const marker = fullMarkerList[markerIndex];
+
+      if (!marker) {
+        throw new Error(`Marker ${rangeName} not found`);
+      }
+
+      // Check if marker is an interval marker (has end time)
+      if (marker.end === null) {
+        throw new Error(
+          `Marker ${rangeName} is an instant marker (no duration). Only interval markers can be used for zoom ranges.`
+        );
+      }
+
+      startTimestamp = marker.start;
+      endTimestamp = marker.end;
+
+      // Store marker info for enhanced output
+      const threadHandle =
+        this._threadMap.handleForThreadIndexes(threadIndexes);
+      const friendlyThreadName = threadSelectors.getFriendlyThreadName(state);
+      markerInfo = {
+        markerHandle: rangeName,
+        markerName: marker.name,
+        threadHandle,
+        threadName: friendlyThreadName,
+      };
+    } else {
+      // Split at comma for traditional range format
+      const parts = rangeName.split(',').map((s) => s.trim());
+      if (parts.length !== 2) {
+        throw new Error(
+          `Invalid range format: "${rangeName}". Expected a marker handle (e.g., "m-1") or two comma-separated values (e.g., "2.7,3.1" or "ts-6,ts-7")`
+        );
+      }
+
+      // Parse start and end values (supports multiple formats)
+      const parsedStart = parseTimeValue(parts[0], rootRange);
+      const parsedEnd = parseTimeValue(parts[1], rootRange);
+
+      // If parseTimeValue returns null, it's a timestamp name - look it up
+      startTimestamp =
+        parsedStart ??
+        (() => {
+          const ts = this._timestampManager.timestampForName(parts[0]);
+          if (ts === null) {
+            throw new Error(`Unknown timestamp name: "${parts[0]}"`);
+          }
+          return ts;
+        })();
+
+      endTimestamp =
+        parsedEnd ??
+        (() => {
+          const ts = this._timestampManager.timestampForName(parts[1]);
+          if (ts === null) {
+            throw new Error(`Unknown timestamp name: "${parts[1]}"`);
+          }
+          return ts;
+        })();
+    }
+
+    // Warn if the requested range extends outside the profile bounds
+    let warning: string | undefined;
+    if (startTimestamp < rootRange.start || endTimestamp > rootRange.end) {
+      const profileDuration = (rootRange.end - rootRange.start) / 1000;
+      warning = `Range extends outside the profile duration (${profileDuration.toFixed(3)}s). Did you mean to use milliseconds? Use the "ms" suffix for milliseconds (e.g. 0ms,400ms).`;
+    }
+
+    // Get or create timestamp names for display
+    const startName = this._timestampManager.nameForTimestamp(startTimestamp);
+    const endName = this._timestampManager.nameForTimestamp(endTimestamp);
+
+    // Convert absolute timestamps to relative timestamps.
+    // commitRange expects timestamps relative to the profile start (zeroAt),
+    // but we have absolute timestamps. The getCommittedRange selector will
+    // add zeroAt back to them.
+    const relativeStart = startTimestamp - zeroAt;
+    const relativeEnd = endTimestamp - zeroAt;
+
+    // Dispatch the commitRange action with relative timestamps
+    this._store.dispatch(commitRange(relativeStart, relativeEnd));
+
+    // Get the zoom depth after pushing
+    const newState = this._store.getState();
+    const committedRanges = getAllCommittedRanges(newState);
+    const zoomDepth = committedRanges.length;
+
+    // Calculate duration
+    const duration = endTimestamp - startTimestamp;
+
+    const message = `Pushed view range: ${startName} (${this._timestampManager.timestampString(startTimestamp)}) to ${endName} (${this._timestampManager.timestampString(endTimestamp)})`;
+
+    return {
+      type: 'view-range',
+      action: 'push',
+      range: {
+        start: startTimestamp,
+        startName,
+        end: endTimestamp,
+        endName,
+      },
+      message,
+      duration,
+      zoomDepth,
+      markerInfo,
+      warning,
+    };
+  }
+
+  /**
+   * Pop the most recent view range selection.
+   */
+  async popViewRange(): Promise<ViewRangeResult> {
+    const state = this._store.getState();
+    const committedRanges = getAllCommittedRanges(state);
+
+    if (committedRanges.length === 0) {
+      throw new Error('No view ranges to pop');
+    }
+
+    // Pop the last committed range (index = length - 1)
+    const poppedIndex = committedRanges.length - 1;
+    this._store.dispatch(popCommittedRanges(poppedIndex, false));
+
+    const poppedRange = committedRanges[poppedIndex];
+
+    // Convert relative timestamps back to absolute timestamps
+    // committedRanges stores timestamps relative to the profile start (zeroAt)
+    const rootRange = getProfileRootRange(state);
+    const zeroAt = rootRange.start;
+    const absoluteStart = poppedRange.start + zeroAt;
+    const absoluteEnd = poppedRange.end + zeroAt;
+
+    const startName = this._timestampManager.nameForTimestamp(absoluteStart);
+    const endName = this._timestampManager.nameForTimestamp(absoluteEnd);
+
+    const message = `Popped view range: ${startName} (${this._timestampManager.timestampString(absoluteStart)}) to ${endName} (${this._timestampManager.timestampString(absoluteEnd)})`;
+
+    return {
+      type: 'view-range',
+      action: 'pop',
+      range: {
+        start: absoluteStart,
+        startName,
+        end: absoluteEnd,
+        endName,
+      },
+      message,
+    };
+  }
+
+  /**
+   * Clear all view range selections (return to root view).
+   */
+  async clearViewRange(): Promise<ViewRangeResult> {
+    const state = this._store.getState();
+    const committedRanges = getAllCommittedRanges(state);
+
+    if (committedRanges.length === 0) {
+      const rootRange = getProfileRootRange(state);
+      const startName = this._timestampManager.nameForTimestamp(
+        rootRange.start
+      );
+      const endName = this._timestampManager.nameForTimestamp(rootRange.end);
+      return {
+        type: 'view-range',
+        action: 'pop',
+        range: {
+          start: rootRange.start,
+          startName,
+          end: rootRange.end,
+          endName,
+        },
+        message: `Already at full profile view: ${startName} (${this._timestampManager.timestampString(rootRange.start)}) to ${endName} (${this._timestampManager.timestampString(rootRange.end)})`,
+      };
+    }
+
+    // Pop all committed ranges (index 0 pops from the first one)
+    this._store.dispatch(popCommittedRanges(0, false));
+
+    const rootRange = getProfileRootRange(state);
+    const startName = this._timestampManager.nameForTimestamp(rootRange.start);
+    const endName = this._timestampManager.nameForTimestamp(rootRange.end);
+
+    const message = `Cleared all view ranges, returned to full profile: ${startName} (${this._timestampManager.timestampString(rootRange.start)}) to ${endName} (${this._timestampManager.timestampString(rootRange.end)})`;
+
+    return {
+      type: 'view-range',
+      action: 'pop',
+      range: {
+        start: rootRange.start,
+        startName,
+        end: rootRange.end,
+        endName,
+      },
+      message,
+    };
+  }
+
+  /**
+   * Select one or more threads by handle (e.g., "t-0" or "t-0,t-1,t-2").
+   */
+  async threadSelect(
+    threadHandle: string
+  ): Promise<WithContext<ThreadSelectResult>> {
+    const threadIndexes = this._threadMap.threadIndexesForHandle(threadHandle);
+
+    // Change the selected threads in the Redux store
+    this._store.dispatch(changeSelectedThreads(threadIndexes));
+
+    const state = this._store.getState();
+    const profile = getProfile(state);
+    const threadNames = Array.from(threadIndexes).map(
+      (idx) => profile.threads[idx].name
+    );
+
+    return {
+      type: 'thread-select',
+      threadHandle,
+      threadNames,
+      context: this._getContext(),
+    };
+  }
+
+  /**
+   * Set the session's call tree summary strategy, i.e. which data source
+   * later commands summarize.
+   */
+  async strategySelect(
+    strategy: CallTreeSummaryStrategy
+  ): Promise<WithContext<StrategySelectResult>> {
+    const threadIndexes = getSelectedThreadIndexes(this._store.getState());
+    this._assertStrategyAvailable(threadIndexes, strategy);
+    this._store.dispatch(changeCallTreeSummaryStrategy(strategy));
+
+    return {
+      type: 'strategy-select',
+      threadHandle: this._threadMap.handleForThreadIndexes(threadIndexes),
+      strategy,
+      availableStrategies: getThreadSelectors(
+        threadIndexes
+      ).getAvailableCallTreeSummaryStrategies(this._store.getState()),
+      context: this._getContext(),
+    };
+  }
+
+  /**
+   * List every bundle source that carries a `sourceMapURL` and is therefore
+   * eligible for `sourcemap apply`. Read-only.
+   */
+  listSourceMapSources(): WithContext<SourceMapSourcesResult> {
+    const eligible = getSourcesWithSourceMaps(this._store.getState());
+    const sources: SourceEntry[] = eligible.map(toSourceEntry);
+    return {
+      type: 'sourcemap-sources',
+      sources,
+      context: this._getContext(),
+    };
+  }
+
+  /**
+   * Write the loaded profile to `absPath`, matching the web app's Download
+   * button with every sharing option checked (only embedded source contents
+   * are removed). A directory target gets a file named like the web download.
+   */
+  async saveProfile(
+    absPath: string,
+    force: boolean
+  ): Promise<WithContext<ProfileSaveResult>> {
+    // Same pipeline as the web app's Download button with every sharing
+    // option checked.
+    const options = getCheckedSharingOptions(
+      this._store.getState(),
+      'download'
+    );
+    for (const slug of Object.keys(options) as Array<keyof typeof options>) {
+      if (!options[slug]) {
+        this._store.dispatch(updateSharingOption('download', slug, true));
+      }
+    }
+    const state = this._store.getState();
+    const profile = getSanitizedProfile(state, 'download').profile;
+
+    const wantsDirectory = absPath.endsWith('/') || absPath.endsWith(path.sep);
+    const targetStat = fs.statSync(absPath, { throwIfNoEntry: false });
+
+    let outPath = absPath;
+    if (targetStat?.isDirectory()) {
+      outPath = path.join(absPath, `${getFilenameString(state)}.gz`);
+    } else if (wantsDirectory) {
+      throw new Error(`Directory not found: ${absPath}`);
+    } else if (!fs.statSync(path.dirname(absPath), { throwIfNoEntry: false })) {
+      throw new Error(`Directory not found: ${path.dirname(absPath)}`);
+    }
+
+    const alreadyExistsError = () =>
+      new Error(`${outPath} already exists. Pass --force to overwrite it.`);
+
+    // Cheap early check so a large profile isn't encoded just to fail below.
+    // The 'wx' flag makes the real check atomic with the write.
+    if (!force && fs.statSync(outPath, { throwIfNoEntry: false })) {
+      throw alreadyExistsError();
+    }
+
+    const { bytes, format } = await encodeProfileForFilename(profile, outPath);
+
+    try {
+      fs.writeFileSync(outPath, bytes, { flag: force ? 'w' : 'wx' });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw alreadyExistsError();
+      }
+      throw new Error(
+        `Could not write profile to ${outPath}: ${
+          e instanceof Error ? e.message : String(e)
+        }`
+      );
+    }
+
+    return {
+      type: 'profile-save',
+      path: outPath,
+      format,
+      bytes: bytes.byteLength,
+      context: this._getContext(),
+    };
+  }
+
+  /**
+   * Apply a `.map` file (read from `absPath`) to the profile. Mirrors the web
+   * app's "Apply source map…" flow via the shared `applySourceMapFile` thunk,
+   * injecting the Node runner since the daemon has no Web Worker. When
+   * `sourceHandle` is set the auto-match step is skipped and the map is applied
+   * to that source directly.
+   */
+  async applySourceMap(
+    absPath: string,
+    sourceHandle?: string
+  ): Promise<WithContext<ApplySourceMapResult>> {
+    // Resolved before reading the file so a bad `--to` fails without touching
+    // the filesystem.
+    const sourceIndex =
+      sourceHandle !== undefined
+        ? this._resolveTargetSource(sourceHandle)
+        : undefined;
+
+    let contents: string;
+    try {
+      contents = fs.readFileSync(absPath, 'utf8');
+    } catch (e) {
+      throw new Error(
+        `Could not read source map file ${absPath}: ${
+          e instanceof Error ? e.message : String(e)
+        }`
+      );
+    }
+
+    const result = await this._store.dispatch(
+      applySourceMapFile(
+        basename(absPath),
+        contents,
+        sourceIndex,
+        runSourceMapSymbolicationNode
+      )
+    );
+
+    return {
+      ...this._mapApplyResult(result),
+      context: this._getContext(),
+    };
+  }
+
+  /**
+   * Resolve a `--to src-N` handle to the source it targets, rejecting sources
+   * that carry no `sourceMapURL`. That is the same set the web app's picker
+   * offers, and it matters because applying a map to any other source skips the
+   * auto-match step's `no-eligible-sources` guard and then de-minifies nothing,
+   * which reads as a successful apply.
+   */
+  private _resolveTargetSource(sourceHandle: string): IndexIntoSourceTable {
+    const state = this._store.getState();
+    const sourceIndex = parseSourceHandle(
+      sourceHandle,
+      getSourceTable(state).length
+    );
+
+    const eligible = getSourcesWithSourceMaps(state);
+    if (eligible.some((source) => source.sourceIndex === sourceIndex)) {
+      return sourceIndex;
+    }
+
+    if (eligible.length === 0) {
+      throw new Error(
+        `Source ${sourceHandle} has no source map URL, and neither does any other source in this profile.`
+      );
+    }
+
+    const handles = eligible
+      .map(
+        (source) =>
+          `${getSourceHandle(source.sourceIndex)} (${source.filename})`
+      )
+      .join(', ');
+    throw new Error(
+      `Source ${sourceHandle} has no source map URL. Sources you can apply a map to: ${handles}.`
+    );
+  }
+
+  /**
+   * Translate the shared thunk's `ApplySourceMapFileResult` into the CLI's
+   * `ApplySourceMapResult`, converting source indexes into `src-N` handles.
+   */
+  private _mapApplyResult(
+    result: ApplySourceMapFileResult
+  ): ApplySourceMapResult {
+    switch (result.type) {
+      case 'applied':
+        return {
+          type: 'sourcemap-applied',
+          sourceHandle: getSourceHandle(result.sourceIndex),
+          filename: result.filename,
+        };
+      case 'no-match':
+        return {
+          type: 'sourcemap-unchanged',
+          sourceHandle: getSourceHandle(result.sourceIndex),
+          filename: result.filename,
+        };
+      case 'ambiguous':
+        return {
+          type: 'sourcemap-ambiguous',
+          reason: result.reason,
+          candidates: result.candidates.map(toSourceEntry),
+        };
+      case 'error':
+        return { type: 'sourcemap-error', error: result.error };
+      default:
+        throw assertExhaustiveCheck(result);
+    }
+  }
+
+  /**
+   * Map the current Redux transform stack for `threadsKey` to FilterEntry[],
+   * grouping consecutive transforms that came from the same `filter push`
+   * (each push is recorded as one size in _pushGroupSizes). Transforms not
+   * accounted for by any group — e.g. URL-loaded ones encountered before the
+   * group map was seeded — each become their own size-1 entry.
+   */
+  private _collectFilterEntries(threadsKey: ThreadsKey): FilterEntry[] {
+    const stack = getTransformStack(this._store.getState(), threadsKey);
+    const groups = this._syncPushGroups(threadsKey);
+    const entries: FilterEntry[] = [];
+    let offset = 0;
+    for (const size of groups) {
+      const transforms = stack.slice(offset, offset + size);
+      if (transforms.length === 0) {
+        break;
+      }
+      entries.push({
+        index: entries.length + 1,
+        transforms,
+        description: describeTransformGroup(transforms),
+      });
+      offset += size;
+    }
+    return entries;
+  }
+
+  /**
+   * Push the Redux transforms for a filter spec as one filter entry. `--merge
+   * f-1,f-2` dispatches two Redux transforms but shows up — and pops — as a
+   * single entry.
+   */
+  filterPush(spec: SampleFilterSpec, threadHandle?: string): FilterStackResult {
+    const threadIndexes = this._resolveThreadIndexes(threadHandle);
+    const threadsKey = getThreadsKey(threadIndexes);
+    const actualHandle =
+      threadHandle ?? this._threadMap.handleForThreadIndexes(threadIndexes);
+
+    const groups = this._syncPushGroups(threadsKey);
+    const countBefore = getTransformStack(
+      this._store.getState(),
+      threadsKey
+    ).length;
+    pushSpecTransforms(this._store, threadsKey, spec);
+    const countAfter = getTransformStack(
+      this._store.getState(),
+      threadsKey
+    ).length;
+    groups.push(countAfter - countBefore);
+    const filters = this._collectFilterEntries(threadsKey);
+    const pushed = filters[filters.length - 1];
+
+    return {
+      type: 'filter-stack',
+      threadHandle: actualHandle,
+      filters,
+      callTreeSearch:
+        getCurrentSearchString(this._store.getState()) || undefined,
+      action: 'push',
+      message: `Pushed filter ${pushed.index}: ${pushed.description}`,
+    };
+  }
+
+  /**
+   * Pop the last `count` filter entries (default 1). Each entry is one
+   * previous `filter push` — multi-transform pushes (e.g. `--merge f-1,f-2`)
+   * undo as a single entry because that's how they were shown.
+   */
+  filterPop(count: number = 1, threadHandle?: string): FilterStackResult {
+    const threadIndexes = this._resolveThreadIndexes(threadHandle);
+    const threadsKey = getThreadsKey(threadIndexes);
+    const actualHandle =
+      threadHandle ?? this._threadMap.handleForThreadIndexes(threadIndexes);
+
+    const groups = this._syncPushGroups(threadsKey);
+    const before = this._collectFilterEntries(threadsKey);
+    const toPop = Math.max(0, Math.min(count, groups.length));
+    let transformsToPop = 0;
+    for (let i = 0; i < toPop; i++) {
+      transformsToPop += groups.pop()!;
+    }
+    const beforeStackLength = getTransformStack(
+      this._store.getState(),
+      threadsKey
+    ).length;
+    if (transformsToPop > 0) {
+      this._store.dispatch(
+        popTransformsFromStackForThreads(
+          threadsKey,
+          beforeStackLength - transformsToPop
+        )
+      );
+    }
+    const filters = this._collectFilterEntries(threadsKey);
+    const removed = before.slice(before.length - toPop).reverse();
+
+    let message: string;
+    if (toPop === 0) {
+      message = 'No filters to pop';
+    } else if (removed.length === 1) {
+      message = `Popped filter: ${removed[0].description}`;
+    } else {
+      message = `Popped ${toPop} filters: ${removed.map((f) => f.description).join('; ')}`;
+    }
+
+    return {
+      type: 'filter-stack',
+      threadHandle: actualHandle,
+      filters,
+      callTreeSearch:
+        getCurrentSearchString(this._store.getState()) || undefined,
+      action: 'pop',
+      message,
+    };
+  }
+
+  /**
+   * Clear the thread's transforms and the session-wide call tree search.
+   */
+  filterClear(threadHandle?: string): FilterStackResult {
+    const threadIndexes = this._resolveThreadIndexes(threadHandle);
+    const threadsKey = getThreadsKey(threadIndexes);
+    const actualHandle =
+      threadHandle ?? this._threadMap.handleForThreadIndexes(threadIndexes);
+
+    const entryCount = this._syncPushGroups(threadsKey).length;
+    const search = getCurrentSearchString(this._store.getState());
+    const filterCount = entryCount + (search ? 1 : 0);
+    this._pushGroupSizes.set(threadsKey, []);
+    if (entryCount > 0) {
+      this._store.dispatch(popTransformsFromStackForThreads(threadsKey, 0));
+    }
+    if (search) {
+      this._store.dispatch(changeCallTreeSearchString(''));
+    }
+
+    return {
+      type: 'filter-stack',
+      threadHandle: actualHandle,
+      filters: [],
+      action: 'clear',
+      message:
+        filterCount === 0
+          ? 'No filters to clear'
+          : `Cleared ${filterCount} filter(s)`,
+    };
+  }
+
+  /**
+   * List the thread's transforms and the session-wide call tree search.
+   */
+  filterList(threadHandle?: string): FilterStackResult {
+    const threadIndexes = this._resolveThreadIndexes(threadHandle);
+    const threadsKey = getThreadsKey(threadIndexes);
+    const actualHandle =
+      threadHandle ?? this._threadMap.handleForThreadIndexes(threadIndexes);
+
+    return {
+      type: 'filter-stack',
+      threadHandle: actualHandle,
+      filters: this._collectFilterEntries(threadsKey),
+      callTreeSearch:
+        getCurrentSearchString(this._store.getState()) || undefined,
+    };
+  }
+
+  /**
+   * Resolve thread indexes, apply strategy/idle/search/ephemeral-filter wrappers, collect,
+   * and attach common metadata. Shared by threadSamples, threadSamplesTopDown,
+   * and threadSamplesBottomUp.
+   */
+  private _runWithSampleFilters<T>(
+    threadHandle: string | undefined,
+    includeIdle: boolean,
+    search: string | undefined,
+    sampleFilters: SampleFilterSpec[] | undefined,
+    strategy: CallTreeSummaryStrategy | undefined,
+    collect: () => T
+  ): WithContext<
+    T & {
+      activeOnly: boolean;
+      search?: string;
+      activeFilters?: FilterEntry[];
+      ephemeralFilters?: SampleFilterSpec[];
+    }
+  > {
+    const activeOnly = !includeIdle;
+    const threadIndexes = this._resolveThreadIndexes(threadHandle);
+    const result = this._withEphemeralView(
+      threadIndexes,
+      { includeIdle, callTreeSearch: search, sampleFilters, strategy },
+      () => {
+        const result = collect();
+        const context = this._getContext(strategy, threadIndexes);
+        return { ...result, search: context.callTreeSearch, context };
+      }
+    );
+    const activeFilters = this._collectFilterEntries(
+      getThreadsKey(threadIndexes)
+    );
+    return {
+      ...result,
+      activeOnly,
+      activeFilters: activeFilters.length > 0 ? activeFilters : undefined,
+      ephemeralFilters:
+        sampleFilters && sampleFilters.length > 0 ? sampleFilters : undefined,
+    };
+  }
+
+  /**
+   * Run fn() with `options` temporarily applied to the Redux state. Sample
+   * queries compute their output inside it, and permalinks snapshot the URL
+   * state inside it, so a link shows the same view as the query that made it.
+   */
+  private _withEphemeralView<T>(
+    threadIndexes: Set<ThreadIndex>,
+    options: EphemeralViewOptions,
+    fn: () => T
+  ): T {
+    const {
+      includeIdle,
+      callTreeSearch,
+      sampleFilters = [],
+      strategy,
+    } = options;
+    return this._withValidatedStrategy(threadIndexes, strategy, () =>
+      this._withEphemeralFilters(threadIndexes, sampleFilters, () =>
+        this._withCallTreeSearch(callTreeSearch, () =>
+          this._withIncludedIdle(includeIdle, fn)
+        )
+      )
+    );
+  }
+
+  /** A thread handle if given, otherwise the session's selected threads. */
+  private _resolveThreadIndexes(threadHandle?: string): Set<ThreadIndex> {
+    return threadHandle !== undefined
+      ? this._threadMap.threadIndexesForHandle(threadHandle)
+      : getSelectedThreadIndexes(this._store.getState());
+  }
+
+  /**
+   * Temporarily push a list of sample filter specs as Redux transforms, run fn(),
+   * then pop them. Used to apply ephemeral (one-shot) filters to a single command.
+   */
+  private _withEphemeralFilters<T>(
+    threadIndexes: Set<ThreadIndex>,
+    filters: SampleFilterSpec[],
+    fn: () => T
+  ): T {
+    if (filters.length === 0) {
+      return fn();
+    }
+    const threadsKey = getThreadsKey(threadIndexes);
+    const stackLengthBefore = getTransformStack(
+      this._store.getState(),
+      threadsKey
+    ).length;
+
+    try {
+      for (const spec of filters) {
+        pushSpecTransforms(this._store, threadsKey, spec);
+      }
+      return fn();
+    } finally {
+      this._store.dispatch(
+        popTransformsFromStackForThreads(threadsKey, stackLengthBefore)
+      );
+    }
+  }
+
+  /**
+   * Turn on the "include idle samples" toggle around a computation, then
+   * restore the previous value. Used for the --include-idle slow path; the
+   * default CLI state already excludes idle, so no-wrap is the fast path.
+   */
+  private _withIncludedIdle<T>(
+    includeIdle: boolean | undefined,
+    fn: () => T
+  ): T {
+    const previous = getIncludeIdleSamples(this._store.getState());
+    if (!includeIdle || previous) {
+      return fn();
+    }
+    this._store.dispatch(changeIncludeIdleSamples(true));
+    try {
+      return fn();
+    } finally {
+      this._store.dispatch(changeIncludeIdleSamples(previous));
+    }
+  }
+
+  /**
+   * Set the call tree search string around a computation, then restore the
+   * previous search string. An empty or missing search leaves it unchanged.
+   */
+  private _withCallTreeSearch<T>(
+    searchString: string | undefined,
+    fn: () => T
+  ): T {
+    if (!searchString) {
+      return fn();
+    }
+    const previousSearch = getCurrentSearchString(this._store.getState());
+    this._store.dispatch(changeCallTreeSearchString(searchString));
+    try {
+      return fn();
+    } finally {
+      this._store.dispatch(changeCallTreeSearchString(previousSearch));
+    }
+  }
+
+  /**
+   * The per-thread `getCallTreeSummaryStrategy` selector silently falls back to
+   * timing, which would make timing output look like allocation output.
+   */
+  private _withValidatedStrategy<T>(
+    threadIndexes: Set<ThreadIndex>,
+    strategy: CallTreeSummaryStrategy | undefined,
+    fn: () => T
+  ): T {
+    if (strategy !== undefined) {
+      this._assertStrategyAvailable(threadIndexes, strategy);
+    }
+    return withCallTreeSummaryStrategy(this._store, strategy, fn);
+  }
+
+  private _assertStrategyAvailable(
+    threadIndexes: Set<ThreadIndex>,
+    strategy: CallTreeSummaryStrategy
+  ): void {
+    const available = getThreadSelectors(
+      threadIndexes
+    ).getAvailableCallTreeSummaryStrategies(this._store.getState());
+    if (!available.includes(strategy)) {
+      const handle = this._threadMap.handleForThreadIndexes(threadIndexes);
+      throw new Error(
+        `Strategy '${strategy}' has no data in ${handle}. Available: ${available.join(', ') || 'none'}`
+      );
+    }
+  }
+
+  /** Describe a set of threads for a context header: handle plus per-thread names. */
+  private _describeThreads(
+    state: ReturnType<Store['getState']>,
+    threadIndexes: Set<ThreadIndex>
+  ): { handle: string | null; threads: ContextThreadInfo[] } {
+    const profile = getProfile(state);
+    const handle =
+      threadIndexes.size > 0
+        ? this._threadMap.handleForThreadIndexes(threadIndexes)
+        : null;
+    const threads = Array.from(threadIndexes).map((threadIndex) => ({
+      threadIndex,
+      name: profile.threads[threadIndex].name,
+      processName: getFriendlyProcessName(
+        profile.threads,
+        profile.threads[threadIndex]
+      ),
+    }));
+    return { handle, threads };
+  }
+
+  private _buildBaseStatus(state: ReturnType<Store['getState']>) {
+    const rootRange = getProfileRootRange(state);
+    const committedRanges = getAllCommittedRanges(state);
+    const { handle: selectedThreadHandle, threads: selectedThreads } =
+      this._describeThreads(state, getSelectedThreadIndexes(state));
+
+    const zeroAt = rootRange.start;
+    const viewRanges = committedRanges.map((range) => {
+      const absoluteStart = range.start + zeroAt;
+      const absoluteEnd = range.end + zeroAt;
+      return {
+        start: absoluteStart,
+        startName: this._timestampManager.nameForTimestamp(absoluteStart),
+        end: absoluteEnd,
+        endName: this._timestampManager.nameForTimestamp(absoluteEnd),
+      };
+    });
+
+    return {
+      selectedThreadHandle,
+      selectedThreads,
+      viewRanges,
+      rootRange: { start: rootRange.start, end: rootRange.end },
+    };
+  }
+
+  /**
+   * Get current session context for display in command outputs.
+   * This is a lightweight version of getStatus() that includes only
+   * the current view range (not the full stack).
+   *
+   * Commands collecting context after restoring a one-shot --strategy pass it as `effectiveStrategy`.
+   */
+  private _getContext(
+    effectiveStrategy?: CallTreeSummaryStrategy,
+    resultThreadIndexes?: Set<ThreadIndex>
+  ): SessionContext {
+    const state = this._store.getState();
+    const { selectedThreadHandle, selectedThreads, viewRanges, rootRange } =
+      this._buildBaseStatus(state);
+    const currentViewRange =
+      viewRanges.length > 0 ? viewRanges[viewRanges.length - 1] : null;
+
+    // The result-scoped fields only exist to record a divergence, so leave them
+    // empty when the command ran against the selection after all.
+    let resultThreadHandle: string | null = null;
+    let resultThreads: ContextThreadInfo[] = [];
+    if (resultThreadIndexes !== undefined) {
+      const described = this._describeThreads(state, resultThreadIndexes);
+      if (described.handle !== selectedThreadHandle) {
+        resultThreadHandle = described.handle;
+        resultThreads = described.threads;
+      }
+    }
+
+    return {
+      selectedThreadHandle,
+      selectedThreads,
+      resultThreadHandle,
+      resultThreads,
+      currentViewRange,
+      rootRange,
+      callTreeSummaryStrategy:
+        effectiveStrategy ?? this._getEffectiveStrategy(state),
+      callTreeSearch: getCurrentSearchString(state) || undefined,
+    };
+  }
+
+  private _getEffectiveStrategy(
+    state: ReturnType<Store['getState']>
+  ): CallTreeSummaryStrategy {
+    const threadIndexes = getSelectedThreadIndexes(state);
+    if (threadIndexes.size === 0) {
+      return getLastSelectedCallTreeSummaryStrategy(state);
+    }
+    return getThreadSelectors(threadIndexes).getCallTreeSummaryStrategy(state);
+  }
+
+  private _getContextForThreadHandle(
+    threadHandle: string | undefined
+  ): SessionContext {
+    return this._getContext(
+      undefined,
+      threadHandle !== undefined
+        ? this._threadMap.threadIndexesForHandle(threadHandle)
+        : undefined
+    );
+  }
+
+  /**
+   * Get current session status including selected threads and view ranges.
+   */
+  async getStatus(): Promise<StatusResult> {
+    const state = this._store.getState();
+    const { selectedThreadHandle, selectedThreads, viewRanges, rootRange } =
+      this._buildBaseStatus(state);
+
+    // Collect active filter stacks: every thread with a non-empty Redux
+    // transform stack, whether pushed via the CLI or loaded from the URL.
+    const transformsPerThread = getProfileSpecificState(state).transforms;
+    const filterStacks = Object.entries(transformsPerThread)
+      .filter(([, stack]) => stack.length > 0)
+      .map(([rawKey]) => {
+        // ThreadsKey is number | string; JSON-ish keys come back as strings.
+        const threadsKey: ThreadsKey = /^-?\d+$/.test(rawKey)
+          ? Number(rawKey)
+          : rawKey;
+        return {
+          threadsKey,
+          threadHandle: this._threadMap.handleForKey(threadsKey),
+          filters: this._collectFilterEntries(threadsKey),
+        };
+      });
+
+    return {
+      type: 'status',
+      selectedThreadHandle,
+      selectedThreads,
+      viewRanges,
+      rootRange,
+      filterStacks,
+      callTreeSummaryStrategy: this._getEffectiveStrategy(state),
+      callTreeSearch: getCurrentSearchString(state) || undefined,
+    };
+  }
+
+  /**
+   * Build a profiler.firefox.com URL for the current session view (selected
+   * threads, committed zoom ranges, transforms, strategy), with `view` layered
+   * on top for the ephemeral settings of a single query. Only profiles that are
+   * already reachable by URL can be linked to. Local files would need
+   * publishing first, which the CLI does not support yet.
+   */
+  async permalink(
+    view: PermalinkView = {},
+    shorten: boolean = false
+  ): Promise<PermalinkResult> {
+    const dataSource = getDataSource(this._store.getState());
+    if (dataSource !== 'public' && dataSource !== 'from-url') {
+      throw new Error(
+        'This profile is not reachable by URL, so there is no link to share. ' +
+          'Publishing from profiler-cli is not supported yet: upload the profile ' +
+          'from profiler.firefox.com, then load the resulting URL with ' +
+          '"profiler-cli load <url>".'
+      );
+    }
+
+    const urlState = this._urlStateForView(view);
+    const url = PROFILER_FRONTEND_ORIGIN + urlFromState(urlState);
+    const shortUrl = shorten ? await shortenUrl(url) : null;
+    return { type: 'permalink', url, shortUrl };
+  }
+
+  /**
+   * Snapshot the URL state with `view` applied. Settings that already have
+   * Redux round-trips (idle, call tree search, ephemeral filters, strategy) are
+   * applied through those wrappers so the snapshot is taken inside them, then
+   * reverted. The rest is patched onto the copy directly.
+   */
+  private _urlStateForView(view: PermalinkView): UrlState {
+    const marker: MarkerId | null =
+      view.markerHandle !== undefined
+        ? this._markerMap.markerForHandle(view.markerHandle)
+        : null;
+    const threadIndexes =
+      view.threadHandle === undefined && marker !== null
+        ? marker.threadIndexes
+        : this._resolveThreadIndexes(view.threadHandle);
+
+    const base = this._withEphemeralView(threadIndexes, view, () =>
+      getUrlState(this._store.getState())
+    );
+
+    const profileSpecific = {
+      ...base.profileSpecific,
+      selectedThreads: threadIndexes,
+    };
+    if (view.markerSearch !== undefined) {
+      profileSpecific.markersSearchString = view.markerSearch;
+    }
+    if (view.networkSearch !== undefined) {
+      profileSpecific.networkSearchString = view.networkSearch;
+    }
+    if (view.invertCallstack !== undefined) {
+      profileSpecific.invertCallTree = view.invertCallstack;
+    }
+    if (marker !== null) {
+      profileSpecific.selectedMarkers = {
+        ...profileSpecific.selectedMarkers,
+        [marker.threadsKey]: marker.markerIndex,
+      };
+    }
+    return {
+      ...base,
+      selectedTab: view.tab ?? base.selectedTab,
+      profileSpecific,
+    };
+  }
+
+  /**
+   * Expand a function handle to show the full untruncated name.
+   */
+  async functionExpand(
+    functionHandle: string
+  ): Promise<WithContext<FunctionExpandResult>> {
+    const state = this._store.getState();
+    const profile = getProfile(state);
+    const { resourceTable, stringArray } = profile.shared;
+    const funcTable = computeFuncTableFromRawFuncTable(
+      profile.shared.funcTable
+    );
+
+    // Look up the function
+    const funcIndex = parseFunctionHandle(functionHandle, funcTable.length);
+    const funcName = stringArray[funcTable.name[funcIndex]];
+    const library =
+      getLibNameForFunc(funcIndex, funcTable, resourceTable, stringArray) ??
+      undefined;
+    const fullName = library ? `${library}!${funcName}` : funcName;
+
+    return {
+      type: 'function-expand',
+      functionHandle,
+      funcIndex,
+      name: funcName,
+      fullName,
+      library,
+      context: this._getContext(),
+    };
+  }
+
+  /**
+   * Show detailed information about a function.
+   */
+  async functionInfo(
+    functionHandle: string
+  ): Promise<WithContext<FunctionInfoResult>> {
+    const state = this._store.getState();
+    const profile = getProfile(state);
+    const { resourceTable, stringArray } = profile.shared;
+    const funcTable = computeFuncTableFromRawFuncTable(
+      profile.shared.funcTable
+    );
+
+    // Look up the function
+    const funcIndex = parseFunctionHandle(functionHandle, funcTable.length);
+    const funcName = stringArray[funcTable.name[funcIndex]];
+    const funcFlags = funcTable.flags[funcIndex];
+    const isJS = (funcFlags & FuncFlag.IsJS) !== 0;
+    const relevantForJS = (funcFlags & FuncFlag.RelevantForJS) !== 0;
+    const hasResource = (funcFlags & FuncFlag.HasResource) !== 0;
+
+    let resource: FunctionInfoResult['resource'];
+    let library: FunctionInfoResult['library'];
+
+    if (hasResource) {
+      const resourceIndex = funcTable.resource[funcIndex];
+      resource = {
+        name: stringArray[resourceTable.name[resourceIndex]],
+        index: resourceIndex,
+      };
+    }
+
+    const lib = getAnyLibForFunc(
+      funcIndex,
+      profile.shared.frameTable,
+      profile.libs
+    );
+    if (lib) {
+      library = {
+        name: lib.name,
+        path: lib.path,
+        debugName: lib.debugName,
+        debugPath: lib.debugPath,
+        breakpadId: lib.breakpadId,
+      };
+    }
+
+    const fullName = lib ? `${lib.name}!${funcName}` : funcName;
+
+    return {
+      type: 'function-info',
+      functionHandle,
+      funcIndex,
+      name: funcName,
+      fullName,
+      isJS,
+      relevantForJS,
+      resource,
+      library,
+      categoryBreakdown: collectFunctionCategoryBreakdowns(
+        this._store,
+        this._threadMap,
+        getSelectedThreadIndexes(state),
+        funcIndex
+      ),
+      context: this._getContext(),
+    };
+  }
+
+  /**
+   * List markers for a thread with aggregated statistics.
+   */
+  async threadMarkers(
+    threadHandle?: string,
+    filterOptions?: MarkerFilterOptions
+  ): Promise<WithContext<ThreadMarkersResult>> {
+    const result = await collectThreadMarkers(
+      this._store,
+      this._threadMap,
+      this._markerMap,
+      threadHandle,
+      filterOptions
+    );
+    return {
+      ...result,
+      context: this._getContextForThreadHandle(threadHandle),
+    };
+  }
+
+  /**
+   * List completed network requests for a thread with timing phases.
+   */
+  async threadNetwork(
+    threadHandle?: string,
+    filterOptions?: {
+      searchString?: string;
+      minDuration?: number;
+      maxDuration?: number;
+      limit?: number;
+      sort?: NetworkRequestSort;
+    }
+  ): Promise<WithContext<ThreadNetworkResult>> {
+    const result = collectThreadNetwork(
+      this._store,
+      this._threadMap,
+      this._markerMap,
+      threadHandle,
+      filterOptions
+    );
+    return {
+      ...result,
+      context: this._getContextForThreadHandle(threadHandle),
+    };
+  }
+
+  /**
+   * Summarize a page load: navigation timing, resource stats, CPU categories, and jank.
+   */
+  async threadPageLoad(
+    threadHandle?: string,
+    options?: { navigationIndex?: number; jankLimit?: number }
+  ): Promise<WithContext<ThreadPageLoadResult>> {
+    const result = collectThreadPageLoad(
+      this._store,
+      this._threadMap,
+      this._timestampManager,
+      this._markerMap,
+      threadHandle,
+      options
+    );
+    return {
+      ...result,
+      context: this._getContextForThreadHandle(threadHandle),
+    };
+  }
+
+  /**
+   * Extract Log-type markers from the profile in MOZ_LOG format.
+   * Iterates all threads by default; supports filtering by thread, module, level, search, and limit.
+   */
+  async profileLogs(
+    filterOptions: {
+      thread?: string;
+      module?: string;
+      level?: string;
+      search?: string;
+      limit?: number;
+    } = {}
+  ): Promise<WithContext<ProfileLogsResult>> {
+    const result = collectProfileLogs(
+      this._store,
+      this._threadMap,
+      filterOptions
+    );
+    return {
+      ...result,
+      context: this._getContextForThreadHandle(filterOptions.thread),
+    };
+  }
+
+  /**
+   * Search markers across every thread at once: the same rows as
+   * `threadMarkers` in `--list` mode, plus the thread each match was found on
+   * and a per-thread match count.
+   */
+  async profileMarkers(
+    filterOptions: MarkerFilterOptions & { thread?: string } = {}
+  ): Promise<WithContext<ProfileMarkersResult>> {
+    const result = collectProfileMarkers(
+      this._store,
+      this._threadMap,
+      this._markerMap,
+      filterOptions
+    );
+    return { ...result, context: this._getContext() };
+  }
+
+  /**
+   * List all functions for a thread with their weight percentages.
+   * Supports filtering by search string, minimum self weight, and limit.
+   */
+  async threadFunctions(
+    threadHandle?: string,
+    filterOptions?: FunctionFilterOptions,
+    includeIdle: boolean = false,
+    sampleFilters?: SampleFilterSpec[],
+    strategy?: CallTreeSummaryStrategy
+  ): Promise<WithContext<ThreadFunctionsResult>> {
+    const activeOnly = !includeIdle;
+    const threadIndexes = this._resolveThreadIndexes(threadHandle);
+    const collect = () =>
+      collectThreadFunctions(
+        this._store,
+        this._threadMap,
+        threadHandle,
+        filterOptions
+      );
+    const result = this._withEphemeralView(
+      threadIndexes,
+      { includeIdle, sampleFilters, strategy },
+      collect
+    );
+    const activeFilters = this._collectFilterEntries(
+      getThreadsKey(threadIndexes)
+    );
+    return {
+      ...result,
+      activeOnly,
+      activeFilters: activeFilters.length > 0 ? activeFilters : undefined,
+      ephemeralFilters:
+        sampleFilters && sampleFilters.length > 0 ? sampleFilters : undefined,
+      context: this._getContext(strategy, threadIndexes),
+    };
+  }
+
+  /**
+   * Show detailed information about a specific marker.
+   */
+  async markerInfo(
+    markerHandle: string
+  ): Promise<WithContext<MarkerInfoResult>> {
+    const result = await collectMarkerInfo(
+      this._store,
+      this._markerMap,
+      this._threadMap,
+      markerHandle
+    );
+    return {
+      ...result,
+      context: this._getContextForThreadHandle(result.threadHandle),
+    };
+  }
+
+  /**
+   * Show detailed information about several markers at once. A handle that does
+   * not resolve goes into `errors` rather than failing the whole query.
+   */
+  async markerInfoMulti(
+    markerHandleSpecs: string[]
+  ): Promise<WithContext<MarkerInfoMultiResult>> {
+    const { handles, ranges } =
+      expandMarkerHandleSpecsDetailed(markerHandleSpecs);
+    const markers: MarkerInfoResult[] = [];
+    const errors: MarkerInfoMultiResult['errors'] = [];
+
+    for (const markerHandle of handles) {
+      try {
+        markers.push(
+          await collectMarkerInfo(
+            this._store,
+            this._markerMap,
+            this._threadMap,
+            markerHandle
+          )
+        );
+      } catch (error) {
+        errors.push({
+          markerHandle,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // Only ranges are checked: a typed-out list of handles from several threads
+    // is a deliberate comparison, not an accident of numbering. Each range is
+    // judged on the markers it expanded to, so an unrelated handle elsewhere in
+    // the command cannot make a single-thread range look like it spans threads.
+    const threadHandleFor = new Map(
+      markers.map((marker) => [marker.markerHandle, marker.threadHandle])
+    );
+    let rangeSpansThreadsWarning:
+      | MarkerInfoMultiResult['rangeSpansThreadsWarning']
+      | undefined;
+    const spanningRanges: string[] = [];
+    const spanningThreadHandles: string[] = [];
+    for (const range of ranges) {
+      const threadHandles: string[] = [];
+      for (const handle of range.handles) {
+        const threadHandle = threadHandleFor.get(handle);
+        if (
+          threadHandle !== undefined &&
+          !threadHandles.includes(threadHandle)
+        ) {
+          threadHandles.push(threadHandle);
+        }
+      }
+      if (threadHandles.length > 1) {
+        spanningRanges.push(range.spec);
+        for (const threadHandle of threadHandles) {
+          if (!spanningThreadHandles.includes(threadHandle)) {
+            spanningThreadHandles.push(threadHandle);
+          }
+        }
+      }
+    }
+    if (spanningRanges.length > 0) {
+      rangeSpansThreadsWarning = {
+        ranges: spanningRanges,
+        threadHandles: spanningThreadHandles,
+      };
+    }
+
+    return {
+      type: 'marker-info-multi',
+      requested: handles,
+      markers,
+      errors,
+      rangeSpansThreadsWarning,
+      context: this._getContext(),
+    };
+  }
+
+  async markerStack(
+    markerHandle: string
+  ): Promise<WithContext<MarkerStackResult>> {
+    const result = await collectMarkerStack(
+      this._store,
+      this._markerMap,
+      this._threadMap,
+      markerHandle
+    );
+    return {
+      ...result,
+      context: this._getContextForThreadHandle(result.threadHandle),
+    };
+  }
+
+  /**
+   * Annotate a function with per-line source or per-instruction assembly weights.
+   *
+   * If `symbolServerUrl` is omitted, falls back to the symbol server resolved
+   * from the loaded profile's URL state (the ?symbolServer= query parameter,
+   * or the default Mozilla server when none was set).
+   */
+  async functionAnnotate(
+    functionHandle: string,
+    mode: AnnotateMode,
+    symbolServerUrl: string | undefined,
+    contextOption: string = '2',
+    strategy?: CallTreeSummaryStrategy
+  ): Promise<WithContext<FunctionAnnotateResult>> {
+    const resolvedSymbolServerUrl =
+      symbolServerUrl ?? getSymbolServerUrl(this._store.getState());
+    if (strategy !== undefined) {
+      this._assertStrategyAvailable(
+        getSelectedThreadIndexes(this._store.getState()),
+        strategy
+      );
+    }
+    const result = await computeFunctionAnnotate(
+      this._store,
+      this._threadMap,
+      this._archiveCache,
+      functionHandle,
+      mode,
+      resolvedSymbolServerUrl,
+      contextOption,
+      strategy
+    );
+    return { ...result, context: this._getContext(strategy) };
+  }
+}

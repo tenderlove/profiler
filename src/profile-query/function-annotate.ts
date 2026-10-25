@@ -1,0 +1,491 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+import { getProfile } from 'firefox-profiler/selectors/profile';
+import { getSelectedThreadIndexes } from 'firefox-profiler/selectors/url-state';
+import { getThreadSelectors } from 'firefox-profiler/selectors/per-thread';
+import { parseFunctionHandle } from './function-map';
+import { getLibNameForFunc } from './function-list';
+import type { ThreadMap } from './thread-map';
+import {
+  getStackLineInfo,
+  getLineTimings,
+} from 'firefox-profiler/profile-logic/line-timings';
+import {
+  getStackAddressInfo,
+  getAddressTimings,
+} from 'firefox-profiler/profile-logic/address-timings';
+import {
+  getNativeSymbolInfo,
+  getNativeSymbolsForFunc,
+  getFunctionFramePerStack,
+  getTotalNativeSymbolTimingsForCallNode,
+  findAddressProofForFile,
+  getOriginalPositionForFrame,
+  computeFuncTableFromRawFuncTable,
+} from 'firefox-profiler/profile-logic/profile-data';
+import { fetchAssembly } from 'firefox-profiler/utils/fetch-assembly';
+import { fetchSource } from 'firefox-profiler/utils/fetch-source';
+import type { ExternalCommunicationDelegate } from 'firefox-profiler/utils/query-api';
+import type { SourceMap } from 'firefox-profiler/profile-logic/source-maps/store';
+import type {
+  Profile,
+  IndexIntoFuncTable,
+  IndexIntoNativeSymbolTable,
+  SamplesLikeTable,
+  Thread,
+} from 'firefox-profiler/types';
+import { FuncFlag } from 'firefox-profiler/types';
+import type {
+  FunctionAnnotateResult,
+  AnnotateMode,
+  CallTreeSummaryStrategy,
+  FunctionAsmAnnotation,
+  SourceAnnotationResult,
+  AsmAnnotationsResult,
+} from './types';
+import { withCallTreeSummaryStrategy } from './call-tree-strategy';
+import type { Store } from '../types/store';
+
+class NodeExternalCommunicationDelegate implements ExternalCommunicationDelegate {
+  async fetchUrlResponse(url: string, postData?: string): Promise<Response> {
+    const init: RequestInit =
+      postData !== undefined ? { method: 'POST', body: postData } : {};
+    return fetch(url, init);
+  }
+
+  async queryBrowserSymbolicationApi(
+    _path: string,
+    _requestJson: string
+  ): Promise<string> {
+    throw new Error('No browser connection available in profiler-cli');
+  }
+
+  async fetchJSSourceFromBrowser(_source: string): Promise<string> {
+    throw new Error('No browser connection available in profiler-cli');
+  }
+
+  async fetchSourceMapFromBrowser(_sourceId: string): Promise<SourceMap> {
+    throw new Error('No browser connection available in profiler-cli');
+  }
+}
+
+const nodeDelegate = new NodeExternalCommunicationDelegate();
+
+async function fetchSourceAnnotation(
+  funcIndex: IndexIntoFuncTable,
+  functionHandle: string,
+  mode: AnnotateMode,
+  thread: Thread,
+  samples: SamplesLikeTable,
+  profile: Profile,
+  symbolServerUrl: string,
+  archiveCache: Map<string, Promise<Uint8Array>>,
+  contextOption: string
+): Promise<SourceAnnotationResult> {
+  const warnings: string[] = [];
+  const rawFuncTable = profile.shared.funcTable;
+  if ((rawFuncTable.flags[funcIndex] & FuncFlag.HasSource) === 0) {
+    if (mode === 'src') {
+      warnings.push(
+        `Function ${functionHandle} has no source index. Use --mode asm for assembly view.`
+      );
+    }
+    return { annotation: null, warnings };
+  }
+  const compiledSourceIndex = rawFuncTable.source[funcIndex];
+
+  const {
+    stackTable,
+    frameTable,
+    funcTable: threadFuncTable,
+    sourceLocationTable,
+  } = thread;
+
+  // For JS-symbolicated funcs, prefer the original source from
+  // sourceLocationTable so the source view shows the original file (filename,
+  // content, line/column hits) rather than the compiled bundle. Falls back to
+  // the compiled source when no source map info is present.
+  const { source: resolvedSourceIndex } = getOriginalPositionForFrame(
+    null,
+    funcIndex,
+    frameTable,
+    threadFuncTable,
+    sourceLocationTable
+  );
+  const sourceIndex = resolvedSourceIndex ?? compiledSourceIndex;
+
+  const filename = thread.stringTable.getString(
+    thread.sources.filename[sourceIndex]
+  );
+  const sourceUuid = thread.sources.id[sourceIndex];
+  const inlineContent = thread.sources.content[sourceIndex];
+
+  const stackLineInfo = getStackLineInfo(
+    stackTable,
+    frameTable,
+    threadFuncTable,
+    sourceIndex,
+    sourceLocationTable
+  );
+  const { totalLineHits, selfLineHits } = getLineTimings(
+    stackLineInfo,
+    samples
+  );
+
+  let samplesWithFunction = 0;
+  let samplesWithLineInfo = 0;
+  for (let si = 0; si < samples.length; si++) {
+    const stackIndex = samples.stack[si];
+    if (stackIndex === null) {
+      continue;
+    }
+    const lineSetIndex = stackLineInfo.stackIndexToLineSetIndex[stackIndex];
+    if (lineSetIndex === -1) {
+      continue;
+    }
+    const weight = samples.weight ? samples.weight[si] : 1;
+    samplesWithFunction += weight;
+    if (stackLineInfo.lineSetTable.self[lineSetIndex] !== -1) {
+      samplesWithLineInfo += weight;
+    }
+  }
+
+  const addressProof = findAddressProofForFile(profile, sourceIndex);
+
+  let fileLines: string[] | null = null;
+  let totalFileLines: number | null = null;
+  if (inlineContent !== null) {
+    // Source content was embedded in the profile (e.g. captured from a source
+    // map's sourcesContent during JS symbolication). Use it directly so the
+    // source view works offline.
+    fileLines = inlineContent.split('\n');
+    totalFileLines = fileLines.length;
+  } else {
+    const fetchResult = await fetchSource(
+      filename,
+      sourceUuid,
+      symbolServerUrl,
+      addressProof,
+      archiveCache,
+      nodeDelegate
+    );
+    if (fetchResult.type === 'SUCCESS') {
+      fileLines = fetchResult.source.split('\n');
+      totalFileLines = fileLines.length;
+    } else {
+      const errorMessages = fetchResult.errors
+        .map((e) => JSON.stringify(e))
+        .join('; ');
+      warnings.push(`Could not fetch source for ${filename}: ${errorMessages}`);
+    }
+  }
+
+  const annotatedLineNums = new Set([
+    ...totalLineHits.keys(),
+    ...selfLineHits.keys(),
+  ]);
+  let linesToShow: Set<number>;
+  let contextMode: string;
+
+  if (contextOption === 'file') {
+    linesToShow = new Set<number>();
+    const last = totalFileLines ?? Math.max(...annotatedLineNums);
+    for (let ln = 1; ln <= last; ln++) {
+      linesToShow.add(ln);
+    }
+    contextMode = 'full file';
+  } else {
+    const parsed = parseInt(contextOption, 10);
+    const context = Math.max(0, isNaN(parsed) ? 2 : parsed);
+    linesToShow = new Set<number>();
+    for (const ln of annotatedLineNums) {
+      for (let ctx = Math.max(1, ln - context); ctx <= ln + context; ctx++) {
+        linesToShow.add(ctx);
+      }
+    }
+    contextMode =
+      context === 0 ? 'annotated lines only' : `±${context} lines context`;
+  }
+
+  const sortedLines = Array.from(linesToShow).sort((a, b) => a - b);
+  return {
+    annotation: {
+      filename,
+      totalFileLines,
+      samplesWithFunction,
+      samplesWithLineInfo,
+      contextMode,
+      lines: sortedLines.map((ln) => ({
+        lineNumber: ln,
+        selfSamples: selfLineHits.get(ln) ?? 0,
+        totalSamples: totalLineHits.get(ln) ?? 0,
+        sourceText: fileLines !== null ? (fileLines[ln - 1] ?? null) : null,
+      })),
+    },
+    warnings,
+  };
+}
+
+// Computing address timings and fetching assembly is done per native symbol,
+// and costs a pass over the whole stack table each. Functions that are inlined
+// in many places can have tens of thousands of native symbols, so only the
+// heaviest ones are annotated.
+const MAX_ASM_NATIVE_SYMBOLS = 10;
+
+export function selectHeaviestNativeSymbols(
+  funcIndex: IndexIntoFuncTable,
+  nativeSymbolsForFunc: Set<IndexIntoNativeSymbolTable>,
+  thread: Thread,
+  samples: SamplesLikeTable
+): Set<IndexIntoNativeSymbolTable> {
+  const { stackTable, frameTable } = thread;
+  const funcFramePerStack = getFunctionFramePerStack(
+    funcIndex,
+    stackTable,
+    frameTable
+  );
+  const weightPerSymbol = getTotalNativeSymbolTimingsForCallNode(
+    samples,
+    funcFramePerStack,
+    frameTable
+  );
+  return new Set(
+    Array.from(nativeSymbolsForFunc)
+      .sort(
+        (a, b) => (weightPerSymbol.get(b) ?? 0) - (weightPerSymbol.get(a) ?? 0)
+      )
+      .slice(0, MAX_ASM_NATIVE_SYMBOLS)
+  );
+}
+
+async function fetchAsmAnnotations(
+  funcIndex: IndexIntoFuncTable,
+  functionHandle: string,
+  nativeSymbolsForFunc: Set<IndexIntoNativeSymbolTable>,
+  thread: Thread,
+  samples: SamplesLikeTable,
+  profile: Profile,
+  symbolServerUrl: string
+): Promise<AsmAnnotationsResult> {
+  const warnings: string[] = [];
+
+  if (nativeSymbolsForFunc.size === 0) {
+    warnings.push(
+      `Function ${functionHandle} has no native symbols — may be JS-only or not symbolicated.`
+    );
+  }
+
+  const { stackTable, frameTable, funcTable: threadFuncTable } = thread;
+  const nativeSymbolCount = nativeSymbolsForFunc.size;
+
+  let symbolsToAnnotate = nativeSymbolsForFunc;
+  if (nativeSymbolCount > MAX_ASM_NATIVE_SYMBOLS) {
+    symbolsToAnnotate = selectHeaviestNativeSymbols(
+      funcIndex,
+      nativeSymbolsForFunc,
+      thread,
+      samples
+    );
+    warnings.push(
+      `Function ${functionHandle} has ${nativeSymbolCount} native symbols; showing only the ${MAX_ASM_NATIVE_SYMBOLS} with the most samples.`
+    );
+  }
+
+  const results = await Promise.all(
+    Array.from(symbolsToAnnotate).map(async (nsIndex) => {
+      const nativeSymbolInfo = getNativeSymbolInfo(
+        nsIndex,
+        thread.nativeSymbols,
+        frameTable,
+        thread.stringTable
+      );
+      const lib = profile.libs[nativeSymbolInfo.libIndex];
+
+      const stackAddressInfo = getStackAddressInfo(
+        stackTable,
+        frameTable,
+        threadFuncTable,
+        nsIndex
+      );
+      const { totalAddressHits, selfAddressHits } = getAddressTimings(
+        stackAddressInfo,
+        samples
+      );
+
+      let fetchError: string | null = null;
+      let instructions: FunctionAsmAnnotation['instructions'] = [];
+      const localWarnings: string[] = [];
+
+      try {
+        const fetchResult = await fetchAssembly(
+          nativeSymbolInfo,
+          lib,
+          symbolServerUrl,
+          nodeDelegate
+        );
+        if (fetchResult.type === 'SUCCESS') {
+          instructions = fetchResult.instructions.map((instr) => ({
+            address: instr.address,
+            selfSamples: selfAddressHits.get(instr.address) ?? 0,
+            totalSamples: totalAddressHits.get(instr.address) ?? 0,
+            decodedString: instr.decodedString,
+          }));
+        } else {
+          fetchError = fetchResult.errors
+            .map((e) => JSON.stringify(e))
+            .join('; ');
+          localWarnings.push(
+            `Assembly fetch failed for ${nativeSymbolInfo.name}: ${fetchError}`
+          );
+        }
+      } catch (e) {
+        fetchError = e instanceof Error ? e.message : String(e);
+        localWarnings.push(
+          `Assembly fetch threw for ${nativeSymbolInfo.name}: ${fetchError}`
+        );
+      }
+
+      return {
+        symbolName: nativeSymbolInfo.name,
+        symbolAddress: nativeSymbolInfo.address,
+        functionSize: nativeSymbolInfo.functionSizeIsKnown
+          ? nativeSymbolInfo.functionSize
+          : null,
+        fetchError,
+        instructions,
+        localWarnings,
+      };
+    })
+  );
+
+  const annotations: FunctionAsmAnnotation[] = [];
+  results.forEach((r, i) => {
+    warnings.push(...r.localWarnings);
+    annotations.push({
+      compilationIndex: i + 1,
+      symbolName: r.symbolName,
+      symbolAddress: r.symbolAddress,
+      functionSize: r.functionSize,
+      nativeSymbolCount,
+      fetchError: r.fetchError,
+      instructions: r.instructions,
+    });
+  });
+
+  return { annotations, warnings };
+}
+
+export async function functionAnnotate(
+  store: Store,
+  threadMap: ThreadMap,
+  archiveCache: Map<string, Promise<Uint8Array>>,
+  functionHandle: string,
+  mode: AnnotateMode,
+  symbolServerUrl: string,
+  contextOption: string,
+  strategy?: CallTreeSummaryStrategy
+): Promise<FunctionAnnotateResult> {
+  const state = store.getState();
+  const profile = getProfile(state);
+  const { stringArray, resourceTable } = profile.shared;
+  const funcTable = computeFuncTableFromRawFuncTable(profile.shared.funcTable);
+
+  const funcIndex = parseFunctionHandle(functionHandle, funcTable.length);
+  const funcName = stringArray[funcTable.name[funcIndex]];
+
+  const libraryName = getLibNameForFunc(
+    funcIndex,
+    funcTable,
+    resourceTable,
+    stringArray
+  );
+  const fullName = libraryName ? `${libraryName}!${funcName}` : funcName;
+
+  const threadIndexes = getSelectedThreadIndexes(state);
+  const threadHandle = threadMap.handleForThreadIndexes(threadIndexes);
+
+  // Every strategy-dependent read happens in this synchronous block, so the
+  // strategy is restored before the fetches below start awaiting.
+  const {
+    thread,
+    ctssSamples,
+    weightType,
+    callTreeSummaryStrategy,
+    friendlyThreadName,
+    totalSelfSamples,
+    totalTotalSamples,
+  } = withCallTreeSummaryStrategy(store, strategy, () => {
+    const strategyState = store.getState();
+    const threadSelectors = getThreadSelectors(threadIndexes);
+    const { funcSelf, funcTotal } =
+      threadSelectors.getFunctionListTimings(strategyState);
+    return {
+      thread: threadSelectors.getFilteredThread(strategyState),
+      ctssSamples: threadSelectors.getFilteredCtssSamples(strategyState),
+      weightType: threadSelectors.getWeightTypeForCallTree(strategyState),
+      callTreeSummaryStrategy:
+        threadSelectors.getCallTreeSummaryStrategy(strategyState),
+      friendlyThreadName: threadSelectors.getFriendlyThreadName(strategyState),
+      totalSelfSamples: funcSelf[funcIndex],
+      totalTotalSamples: funcTotal[funcIndex],
+    };
+  });
+
+  const nativeSymbolsForFunc = getNativeSymbolsForFunc(
+    funcIndex,
+    thread.frameTable
+  );
+
+  const srcPromise: Promise<SourceAnnotationResult> =
+    mode === 'src' || mode === 'all'
+      ? fetchSourceAnnotation(
+          funcIndex,
+          functionHandle,
+          mode,
+          thread,
+          ctssSamples,
+          profile,
+          symbolServerUrl,
+          archiveCache,
+          contextOption
+        )
+      : Promise.resolve({ annotation: null, warnings: [] });
+
+  const asmPromise: Promise<AsmAnnotationsResult> =
+    mode === 'asm' || mode === 'all'
+      ? fetchAsmAnnotations(
+          funcIndex,
+          functionHandle,
+          nativeSymbolsForFunc,
+          thread,
+          ctssSamples,
+          profile,
+          symbolServerUrl
+        )
+      : Promise.resolve({ annotations: [], warnings: [] });
+
+  const [
+    { annotation: srcAnnotation, warnings: srcWarnings },
+    { annotations: asmAnnotations, warnings: asmWarnings },
+  ] = await Promise.all([srcPromise, asmPromise]);
+
+  return {
+    type: 'function-annotate',
+    functionHandle,
+    funcIndex,
+    name: funcName,
+    fullName,
+    threadHandle,
+    friendlyThreadName,
+    totalSelfSamples,
+    totalTotalSamples,
+    callTreeSummaryStrategy,
+    weightType,
+    mode,
+    srcAnnotation,
+    asmAnnotations,
+    warnings: [...srcWarnings, ...asmWarnings],
+  };
+}

@@ -11,7 +11,11 @@ import type {
   LineTimings,
   LineNumber,
   IndexIntoSourceTable,
+  IndexIntoLineSetTable,
+  SourceLocationTable,
 } from 'firefox-profiler/types';
+import { FrameFlag, FuncFlag } from 'firefox-profiler/types';
+import { SetCollectionBuilder } from 'firefox-profiler/utils/set-collection';
 
 /**
  * For each stack in `stackTable`, and one specific source file, compute the
@@ -19,9 +23,9 @@ import type {
  *
  * For each stack we answer the following question:
  *  - "Does this stack contribute to line X's self time?"
- *       Answer: result.selfLine[stack] === X
+ *       Answer: result.lineSetTable.self[result.stackIndexToLineSetIndex[stack]] === X
  *  - "Does this stack contribute to line X's total time?"
- *       Answer: result.stackLines[stack].has(X)
+ *       Answer: X is in the set represented by entry result.stackIndexToLineSetIndex[stack] in result.lineSetTable
  *
  * Compute the sets of line numbers in the given file that are hit by each stack.
  * For each stack in the stack table and each line in the file, we answer the
@@ -40,69 +44,80 @@ import type {
  * This last line is the stack's "self line".
  * If there is recursion, and the same line is present in multiple frames in the
  * same stack, the line is only counted once - the lines are stored in a set.
- *
- * The returned StackLineInfo is computed as follows:
- *   selfLine[stack]:
- *     For stacks whose stack.frame.func.file is the given file, this is stack.frame.line.
- *     For all other stacks this is null.
- *   stackLines[stack]:
- *     For stacks whose stack.frame.func.file is the given file, this is the stackLines
- *     of its prefix stack, plus stack.frame.line added to the set.
- *     For all other stacks this is the same as the stackLines set of the stack's prefix.
  */
 export function getStackLineInfo(
   stackTable: StackTable,
   frameTable: FrameTable,
   funcTable: FuncTable,
-  sourceViewSourceIndex: IndexIntoSourceTable
+  sourceViewSourceIndex: IndexIntoSourceTable,
+  sourceLocationTable: SourceLocationTable
 ): StackLineInfo {
-  // "self line" == "the line which a stack's self time is contributed to"
-  const selfLineForAllStacks = [];
-  // "total lines" == "the set of lines whose total time this stack contributes to"
-  const totalLinesForAllStacks: Array<Set<LineNumber> | null> = [];
+  const builder = new SetCollectionBuilder<number>();
+  const stackIndexToLineSetIndex = new Int32Array(stackTable.length);
 
-  // This loop takes advantage of the fact that the stack table is topologically ordered:
-  // Prefix stacks are always visited before their descendants.
-  // Each stack inherits the "total" lines from its parent stack, and then adds its
-  // self line to that set. If the stack doesn't have a self line in the file, we just
-  // re-use the prefix's set object without copying it.
   for (let stackIndex = 0; stackIndex < stackTable.length; stackIndex++) {
-    const frame = stackTable.frame[stackIndex];
     const prefixStack = stackTable.prefix[stackIndex];
+    const prefixLineSet: IndexIntoLineSetTable | -1 =
+      prefixStack !== -1 ? stackIndexToLineSetIndex[prefixStack] : -1;
+
+    const frame = stackTable.frame[stackIndex];
     const func = frameTable.func[frame];
-    const sourceIndexOfThisStack = funcTable.source[func];
 
-    let selfLine: LineNumber | null = null;
-    let totalLines: Set<LineNumber> | null =
-      prefixStack !== null ? totalLinesForAllStacks[prefixStack] : null;
-
-    if (sourceIndexOfThisStack === sourceViewSourceIndex) {
-      selfLine = frameTable.line[frame];
-      // Fallback to func line info if frame line info is not available
-      if (selfLine === null) {
-        selfLine = funcTable.lineNumber[func];
-      }
-      if (selfLine !== null) {
-        // Add this stack's line to this stack's totalLines. The rest of this stack's
-        // totalLines is the same as for the parent stack.
-        // We avoid creating new Set objects unless the new set is actually
-        // different.
-        if (totalLines === null) {
-          // None of the ancestor stack nodes have hit a line in the given file.
-          totalLines = new Set([selfLine]);
-        } else if (!totalLines.has(selfLine)) {
-          totalLines = new Set(totalLines);
-          totalLines.add(selfLine);
-        }
-      }
+    // Inlined source resolution from getOriginalPositionForFrame. We avoid
+    // its per-stack {source, line, column} allocation, skip resolving the
+    // column entirely, and defer the line lookup until we know the source
+    // matches.
+    const frameFlags = frameTable.flags[frame];
+    const funcFlags = funcTable.flags[func];
+    const frameHasOriginalLocation =
+      (frameFlags & FrameFlag.HasOriginalLocation) !== 0;
+    const funcHasOriginalLocation =
+      (funcFlags & FuncFlag.HasOriginalLocation) !== 0;
+    const frameOriginalLocationIdx = frameHasOriginalLocation
+      ? frameTable.originalLocation[frame]
+      : -1;
+    const funcOriginalLocationIdx = funcHasOriginalLocation
+      ? funcTable.originalLocation[func]
+      : -1;
+    let sourceIndexOfThisStack;
+    if (frameHasOriginalLocation) {
+      sourceIndexOfThisStack =
+        sourceLocationTable.source[frameOriginalLocationIdx];
+    } else if (funcHasOriginalLocation) {
+      sourceIndexOfThisStack =
+        sourceLocationTable.source[funcOriginalLocationIdx];
+    } else if ((funcFlags & FuncFlag.HasSource) !== 0) {
+      sourceIndexOfThisStack = funcTable.source[func];
+    } else {
+      sourceIndexOfThisStack = -1;
     }
 
-    selfLineForAllStacks.push(selfLine);
-    totalLinesForAllStacks.push(totalLines);
+    const matchesSource = sourceIndexOfThisStack === sourceViewSourceIndex;
+    if (prefixLineSet === -1 && !matchesSource) {
+      stackIndexToLineSetIndex[stackIndex] = -1;
+    } else {
+      let selfLineOrNull: number | null = null;
+      if (matchesSource) {
+        if (frameHasOriginalLocation) {
+          selfLineOrNull = sourceLocationTable.line[frameOriginalLocationIdx];
+        } else if (funcHasOriginalLocation) {
+          selfLineOrNull = sourceLocationTable.line[funcOriginalLocationIdx];
+        } else if ((frameFlags & FrameFlag.HasLine) !== 0) {
+          selfLineOrNull = frameTable.line[frame];
+        } else if ((funcFlags & FuncFlag.HasLine) !== 0) {
+          selfLineOrNull = funcTable.lineNumber[func];
+        }
+      }
+
+      stackIndexToLineSetIndex[stackIndex] = builder.extend(
+        prefixLineSet !== -1 ? prefixLineSet : null,
+        selfLineOrNull !== null ? selfLineOrNull : -1
+      );
+    }
   }
   return {
-    selfLine: selfLineForAllStacks,
-    stackLines: totalLinesForAllStacks,
+    stackIndexToLineSetIndex,
+    lineSetTable: builder.finish(),
   };
 }
 
@@ -122,30 +137,66 @@ export function getLineTimings(
   if (stackLineInfo === null) {
     return emptyLineTimings;
   }
-  const { selfLine, stackLines } = stackLineInfo;
-  const totalLineHits: Map<LineNumber, number> = new Map();
-  const selfLineHits: Map<LineNumber, number> = new Map();
+  const { stackIndexToLineSetIndex, lineSetTable } = stackLineInfo;
 
-  // Iterate over all the samples, and aggregate the sample's weight into the
-  // lines which are hit by the sample's stack.
-  // TODO: Maybe aggregate sample count per stack first, and then visit each stack only once?
+  // We do two passes to compute the timings:
+  // 1. One pass over the samples to accumulate the sample weight onto the
+  //    nodes in the lineSetTable.
+  // 2. One pass (from back to front) over the lineSetTable, propagating
+  //    values up the tree and, at the same time, accumulating per-line
+  //    totals.
+
+  // First, do the pass over the samples to compute the weight per line set.
+  const selfPerLineSet = new Float64Array(lineSetTable.length);
   for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex++) {
     const stackIndex = samples.stack[sampleIndex];
     if (stackIndex === null) {
       continue;
     }
-    const weight = samples.weight ? samples.weight[sampleIndex] : 1;
-    const setOfHitLines = stackLines[stackIndex];
-    if (setOfHitLines !== null) {
-      for (const line of setOfHitLines) {
-        const oldHitCount = totalLineHits.get(line) ?? 0;
-        totalLineHits.set(line, oldHitCount + weight);
+    const lineSetIndex = stackIndexToLineSetIndex[stackIndex];
+    if (lineSetIndex !== -1) {
+      const weight = samples.weight ? samples.weight[sampleIndex] : 1;
+      selfPerLineSet[lineSetIndex] += weight;
+    }
+  }
+
+  // Now, do a pass over the lineSetTable, from back to front.
+  // This is a similar idea to what we do for the call tree or the function
+  // list. The upwards propagation of a sample's weight will not contribute
+  // to the same line multiple times thanks to the guarantees of the
+  // lineSetTable - there are no duplicate values on a node's path to the
+  // root.
+  const totalLineHits: Map<LineNumber, number> = new Map();
+  const selfLineHits: Map<LineNumber, number> = new Map();
+  const selfSumOfLineSetDescendants = new Float64Array(lineSetTable.length);
+  for (
+    let lineSetIndex = lineSetTable.length - 1;
+    lineSetIndex >= 0;
+    lineSetIndex--
+  ) {
+    const selfWeight = selfPerLineSet[lineSetIndex];
+    if (selfWeight !== 0) {
+      const selfLine = lineSetTable.self[lineSetIndex];
+      if (selfLine !== -1) {
+        const oldHitCount = selfLineHits.get(selfLine) ?? 0;
+        selfLineHits.set(selfLine, oldHitCount + selfWeight);
       }
     }
-    const line = selfLine[stackIndex];
-    if (line !== null) {
-      const oldHitCount = selfLineHits.get(line) ?? 0;
-      selfLineHits.set(line, oldHitCount + weight);
+
+    const selfSumOfThisLineSetDescendants =
+      selfSumOfLineSetDescendants[lineSetIndex];
+    const thisLineSetWeight = selfWeight + selfSumOfThisLineSetDescendants;
+    const lineSetParent = lineSetTable.parent[lineSetIndex];
+    if (lineSetParent !== null) {
+      selfSumOfLineSetDescendants[lineSetParent] += thisLineSetWeight;
+    }
+
+    if (thisLineSetWeight !== 0) {
+      const line = lineSetTable.value[lineSetIndex];
+      if (line !== -1) {
+        const oldHitCount = totalLineHits.get(line) ?? 0;
+        totalLineHits.set(line, oldHitCount + thisLineSetWeight);
+      }
     }
   }
   return { totalLineHits, selfLineHits };
@@ -159,7 +210,9 @@ export function getTotalLineTimingsForCallNode(
   samples: SamplesLikeTable,
   callNodeFramePerStack: Int32Array,
   frameTable: FrameTable,
-  funcLine: LineNumber | null
+  funcTable: FuncTable,
+  funcLine: LineNumber | null,
+  sourceLocationTable: SourceLocationTable
 ): Map<LineNumber, number> {
   const totalPerLine = new Map<LineNumber, number>();
   for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex++) {
@@ -169,11 +222,30 @@ export function getTotalLineTimingsForCallNode(
     }
     const callNodeFrame = callNodeFramePerStack[stack];
     if (callNodeFrame === -1) {
-      // This sample does not contribute to the call node's total. Ignore.
       continue;
     }
 
-    const frameLine = frameTable.line[callNodeFrame];
+    // Resolve in the same coordinate space as the source view: prefer the
+    // source-mapped line, otherwise the frame's compiled line, otherwise the
+    // func's compiled line. Inlined from getOriginalPositionForFrame to avoid
+    // the per-sample object allocation.
+    const funcIndex = frameTable.func[callNodeFrame];
+    const frameFlags = frameTable.flags[callNodeFrame];
+    const funcFlags = funcTable.flags[funcIndex];
+    let frameLine: number | null;
+    if ((frameFlags & FrameFlag.HasOriginalLocation) !== 0) {
+      frameLine =
+        sourceLocationTable.line[frameTable.originalLocation[callNodeFrame]];
+    } else if ((funcFlags & FuncFlag.HasOriginalLocation) !== 0) {
+      frameLine =
+        sourceLocationTable.line[funcTable.originalLocation[funcIndex]];
+    } else if ((frameFlags & FrameFlag.HasLine) !== 0) {
+      frameLine = frameTable.line[callNodeFrame];
+    } else if ((funcFlags & FuncFlag.HasLine) !== 0) {
+      frameLine = funcTable.lineNumber[funcIndex];
+    } else {
+      frameLine = null;
+    }
     const line = frameLine !== null ? frameLine : funcLine;
     if (line === null) {
       continue;

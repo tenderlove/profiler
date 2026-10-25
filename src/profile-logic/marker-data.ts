@@ -1,9 +1,19 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-import { getEmptyRawMarkerTable } from './data-structures';
-import { getFriendlyThreadName } from './profile-data';
-import { removeFilePath, removeURLs, stringsToRegExp } from '../utils/string';
+import {
+  getDefaultCategories,
+  getRawMarkerTableBuilder,
+  finishRawMarkerTableBuilder,
+  type RawMarkerTableBuilder,
+} from './data-structures';
+import { getFriendlyThreadName, getTimeRangeForThread } from './profile-data';
+import {
+  removeFilePath,
+  removeURLs,
+  stringsToRegExp,
+  splitSearchString,
+} from '../utils/string';
 import { StringTable } from '../utils/string-table';
 import { ensureExists, assertExhaustiveCheck } from '../utils/types';
 import {
@@ -14,7 +24,10 @@ import {
 } from 'firefox-profiler/app-logic/constants';
 import {
   getSchemaFromMarker,
+  isStringIndexFormat,
+  isStringIndexMarkerField,
   markerPayloadMatchesSearch,
+  markerSchemaFrontEndOnly,
 } from './marker-schema';
 
 import type {
@@ -32,15 +45,18 @@ import type {
   IPCSharedData,
   IPCMarkerPayload,
   NetworkPayload,
-  PrefMarkerPayload,
-  TextMarkerPayload,
   StartEndRange,
   IndexedArray,
   DerivedMarkerInfo,
   MarkerSchema,
+  MarkerSchemaPIICategory,
   MarkerSchemaByName,
   MarkerDisplayLocation,
   Tid,
+  LogMarkerPayload,
+  ThreadIndex,
+  Profile,
+  RemoveProfileInformation,
 } from 'firefox-profiler/types';
 
 /**
@@ -391,7 +407,8 @@ export function correlateIPCMarkers(
       switch (phase) {
         case 'endpoint':
         // We don't have a 'phase' field in the older profiles, in that case
-        // their phase is 'endpoint'. (fallthrough)
+        // their phase is 'endpoint'.
+        // falls through
         case undefined:
           return 0;
         case 'transferStart':
@@ -407,7 +424,8 @@ export function correlateIPCMarkers(
           return 3;
         case 'endpoint':
         // We don't have a 'phase' field in the older profiles, in that case
-        // their phase is 'endpoint'. (fallthrough)
+        // their phase is 'endpoint'.
+        // falls through
         case undefined:
           return 4;
         case 'transferStart':
@@ -545,7 +563,6 @@ export function correlateIPCMarkers(
  *   the thread range. For the reverse situation, it's set to the start.
  *
  * There is also some special handling of different markers.
- *   - CompositorScreenshot - They are turned from Instant markers to Interval markers
  *   - IPC - They are matched up.
  *   - Network - They have different network phases.
  *
@@ -600,13 +617,9 @@ export function deriveMarkersFromRawMarkerTable(
     return {
       ...startData,
       ...endData,
-    };
+    } as MarkerPayload;
   }
 
-  // We don't add a screenshot marker as we find it, because to know its
-  // duration we need to wait until the next one or the end of the profile. So
-  // we keep it here.
-  const previousScreenshotMarkers: Map<string, MarkerIndex> = new Map();
   for (
     let rawMarkerIndex = 0;
     rawMarkerIndex < rawMarkers.length;
@@ -709,51 +722,6 @@ export function deriveMarkersFromRawMarkerTable(
                 incomplete: true,
               });
             }
-          }
-
-          continue;
-        }
-
-        case 'CompositorScreenshot': {
-          // Screenshot markers are already ordered. In the raw marker table,
-          // they're Instant markers, but since they're valid until the following
-          // raw marker of the same type and the same window, we convert them to
-          // Interval markers with a a start and end time.
-
-          const { windowID } = data;
-          const previousScreenshotMarker =
-            previousScreenshotMarkers.get(windowID);
-          if (previousScreenshotMarker !== undefined) {
-            previousScreenshotMarkers.delete(windowID);
-            const previousStartTime = ensureExists(
-              rawMarkers.startTime[previousScreenshotMarker],
-              'Expected to find a start time for a screenshot marker.'
-            );
-            const thisStartTime = ensureExists(
-              maybeStartTime,
-              'The CompositorScreenshot is assumed to have a start time.'
-            );
-            const data = rawMarkers.data[previousScreenshotMarker];
-            const markerThreadId = rawMarkers.threadId
-              ? rawMarkers.threadId[previousScreenshotMarker]
-              : null;
-            addMarker([previousScreenshotMarker], {
-              start: previousStartTime,
-              end: thisStartTime,
-              name: 'CompositorScreenshot',
-              category,
-              threadId: markerThreadId,
-              data,
-            });
-          }
-          if (stringArray[name] === 'CompositorScreenshotWindowDestroyed') {
-            // This marker is added when a window is destroyed. In this case we
-            // don't want to store it as the start of the next compositor
-            // marker. But we do want to keep it, so we break out of the
-            // switch/case so that the standard processing happens.
-            break;
-          } else {
-            previousScreenshotMarkers.set(windowID, rawMarkerIndex);
           }
 
           continue;
@@ -976,25 +944,100 @@ export function deriveMarkersFromRawMarkerTable(
     });
   }
 
-  // And we also need to add the "last screenshot markers".
-  for (const previousScreenshotMarker of previousScreenshotMarkers.values()) {
-    const start = ensureExists(
-      rawMarkers.startTime[previousScreenshotMarker],
-      'Expected to find a CompositorScreenshot marker with a start time.'
-    );
-    addMarker([previousScreenshotMarker], {
-      start,
-      end: Math.max(endOfThread, start),
-      name: 'CompositorScreenshot',
-      category: rawMarkers.category[previousScreenshotMarker],
-      threadId: rawMarkers.threadId
-        ? rawMarkers.threadId[previousScreenshotMarker]
-        : null,
-      data: rawMarkers.data[previousScreenshotMarker],
-    });
+  return { markers, markerIndexToRawMarkerIndexes };
+}
+
+/**
+ * Return the merged list of marker schemas which contains both the schemas
+ * from the profile, and the front-end only schemas ("Jank" etc).
+ */
+export function computeCombinedMarkerSchemaList(
+  markerSchemaFromProfile: MarkerSchema[]
+): MarkerSchema[] {
+  const frontEndSchemaNames = new Set(
+    markerSchemaFrontEndOnly.map((schema) => schema.name)
+  );
+  return [
+    ...markerSchemaFromProfile.filter(
+      (schema) => !frontEndSchemaNames.has(schema.name)
+    ),
+    ...markerSchemaFrontEndOnly,
+  ];
+}
+
+/**
+ * Create a Set from the list, with the key being schema.name.
+ */
+export function computeMarkerSchemaByName(
+  schemaList: MarkerSchema[]
+): MarkerSchemaByName {
+  const markerSchemaByName: MarkerSchemaByName = Object.create(null);
+  for (const schema of schemaList) {
+    markerSchemaByName[schema.name] = schema;
+  }
+  return markerSchemaByName;
+}
+
+/**
+ * Return the set of threads that have at least one marker matching the given
+ * marker search string, using the same regular marker search syntax: comma-
+ * separated terms, optional `field:value` and `-field:value` qualifiers.
+ *
+ * This is a somewhat expensive operation because we call deriveMarkersFromRawMarkerTable
+ * for every thread.
+ */
+export function getThreadsWithMarkersMatchingSearchFilter(
+  profile: Profile,
+  markerSearch: string
+): Set<ThreadIndex> {
+  const searchRegExps = stringsToMarkerRegExps(splitSearchString(markerSearch));
+  if (searchRegExps === null) {
+    return new Set();
   }
 
-  return { markers, markerIndexToRawMarkerIndexes };
+  const stringTable = StringTable.withBackingArray(profile.shared.stringArray);
+  const categoryList = profile.meta.categories ?? getDefaultCategories();
+
+  const schemaList = computeCombinedMarkerSchemaList(
+    profile.meta.markerSchema ?? []
+  );
+  const markerSchemaByName = computeMarkerSchemaByName(schemaList);
+
+  const ipcCorrelations = correlateIPCMarkers(profile.threads, profile.shared);
+
+  const matchingThreads = new Set<ThreadIndex>();
+
+  for (
+    let threadIndex = 0;
+    threadIndex < profile.threads.length;
+    threadIndex++
+  ) {
+    const thread = profile.threads[threadIndex];
+    const { markers } = deriveMarkersFromRawMarkerTable(
+      thread.markers,
+      profile.shared.stringArray,
+      thread.tid,
+      getTimeRangeForThread(thread, profile.meta.interval),
+      ipcCorrelations
+    );
+    if (markers.length === 0) {
+      continue;
+    }
+    const markerIndexes = markers.map((_, i) => i);
+    const filtered = getSearchFilteredMarkerIndexes(
+      (i) => markers[i],
+      markerIndexes,
+      markerSchemaByName,
+      searchRegExps,
+      stringTable,
+      categoryList
+    );
+    if (filtered.length > 0) {
+      matchingThreads.add(threadIndex);
+    }
+  }
+
+  return matchingThreads;
 }
 
 /**
@@ -1008,7 +1051,7 @@ export function filterRawMarkerTableToRange(
   rangeStart: number,
   rangeEnd: number
 ): RawMarkerTable {
-  const newMarkerTable = getEmptyRawMarkerTable();
+  const newMarkerTable = getRawMarkerTableBuilder();
   if (markerTable.threadId) {
     newMarkerTable.threadId = [];
   }
@@ -1033,7 +1076,7 @@ export function filterRawMarkerTableToRange(
     newMarkerTable.length++;
   }
 
-  return newMarkerTable;
+  return finishRawMarkerTableBuilder(newMarkerTable);
 }
 
 /**
@@ -1082,10 +1125,10 @@ export function filterRawMarkerTableToRangeWithMarkersToDelete(
   markersToDelete: Set<IndexIntoRawMarkerTable>,
   filterRange: StartEndRange | null
 ): {
-  rawMarkerTable: RawMarkerTable;
+  rawMarkerTable: RawMarkerTableBuilder;
   oldMarkerIndexToNew: Map<IndexIntoRawMarkerTable, IndexIntoRawMarkerTable>;
 } {
-  const newMarkerTable = getEmptyRawMarkerTable();
+  const newMarkerTable = getRawMarkerTableBuilder();
   const newThreadId: (Tid | null)[] = [];
   if (oldMarkerTable.threadId) {
     newMarkerTable.threadId = newThreadId;
@@ -1327,107 +1370,134 @@ export function getColorClassNameForMimeType(
   }
 }
 
-export function groupScreenshotsById(
-  getMarker: (markerIndex: MarkerIndex) => Marker,
-  markerIndexes: MarkerIndex[]
-): Map<string, Marker[]> {
-  const idToScreenshotMarkers = new Map<string, Marker[]>();
-  for (const markerIndex of markerIndexes) {
-    const marker = getMarker(markerIndex);
-    const { data } = marker;
-    if (data && data.type === 'CompositorScreenshot') {
-      let markers = idToScreenshotMarkers.get(data.windowID);
-      if (markers === undefined) {
-        markers = [];
-        idToScreenshotMarkers.set(data.windowID, markers);
+function _shouldSanitizePIICategory(
+  category: MarkerSchemaPIICategory,
+  PIIToBeRemoved: RemoveProfileInformation
+): boolean {
+  switch (category) {
+    case 'url':
+      return PIIToBeRemoved.shouldRemoveUrls;
+    case 'extension-id':
+      return PIIToBeRemoved.shouldRemoveExtensions;
+    case 'preference-value':
+      return PIIToBeRemoved.shouldRemovePreferenceValues;
+    case 'private-browsing':
+      return PIIToBeRemoved.shouldRemovePrivateBrowsingData;
+    default:
+      throw assertExhaustiveCheck(category);
+  }
+}
+
+function _updateMarkerPayloadField(
+  markerPayload: MarkerPayload,
+  key: string,
+  isStringIndex: boolean,
+  stringTable: StringTable,
+  transform: (text: string) => string
+): MarkerPayload {
+  const value = (markerPayload as any)[key];
+  if (!isStringIndex) {
+    return { ...markerPayload, [key]: transform(value) } as any;
+  }
+
+  const stringIndex = value as IndexIntoStringTable;
+  if (!stringTable.hasIndex(stringIndex)) {
+    return markerPayload;
+  }
+  const text = stringTable.getString(stringIndex);
+  const newText = transform(text);
+  if (newText === text) {
+    return markerPayload;
+  }
+  return {
+    ...markerPayload,
+    [key]: stringTable.indexForString(newText),
+  } as any;
+}
+
+/** Apply a marker schema's PII rules to its payload. */
+export function sanitizeMarkerFromSchema(
+  markerSchema: MarkerSchema,
+  markerPayload: MarkerPayload,
+  stringTable: StringTable,
+  PIIToBeRemoved: RemoveProfileInformation
+): {
+  markerPayload: MarkerPayload;
+  shouldRemoveMarker: boolean;
+} {
+  let shouldRemoveMarker = false;
+
+  for (const { key, format, containsPII = [] } of markerSchema.fields) {
+    const hasField = key in markerPayload;
+
+    if (hasField) {
+      // The casts are needed because TypeScript cannot refine the payload union
+      // using a schema field that is only known at runtime.
+      if (PIIToBeRemoved.shouldRemoveUrls && format === 'url') {
+        markerPayload = {
+          ...markerPayload,
+          [key]: removeURLs((markerPayload as any)[key]),
+        } as any;
+      } else if (PIIToBeRemoved.shouldRemoveUrls && format === 'file-path') {
+        markerPayload = {
+          ...markerPayload,
+          [key]: removeFilePath((markerPayload as any)[key]),
+        } as any;
+      } else if (
+        PIIToBeRemoved.shouldRemoveUrls &&
+        format === 'sanitized-string'
+      ) {
+        markerPayload = {
+          ...markerPayload,
+          [key]: '<sanitized>',
+        } as any;
+      }
+    }
+
+    const isStringIndex = isStringIndexFormat(format);
+    for (const category of containsPII) {
+      if (!_shouldSanitizePIICategory(category, PIIToBeRemoved)) {
+        continue;
       }
 
-      markers.push(marker);
+      switch (category) {
+        case 'url':
+          if (hasField) {
+            markerPayload = _updateMarkerPayloadField(
+              markerPayload,
+              key,
+              isStringIndex,
+              stringTable,
+              removeURLs
+            );
+          }
+          break;
+        case 'extension-id':
+          if (hasField) {
+            markerPayload = { ...markerPayload };
+            delete (markerPayload as any)[key];
+          }
+          break;
+        case 'preference-value':
+          markerPayload = _updateMarkerPayloadField(
+            markerPayload,
+            key,
+            isStringIndex,
+            stringTable,
+            () => ''
+          );
+          break;
+        case 'private-browsing':
+          shouldRemoveMarker ||=
+            hasField && Boolean((markerPayload as any)[key]);
+          break;
+        default:
+          assertExhaustiveCheck(category);
+      }
     }
   }
 
-  return idToScreenshotMarkers;
-}
-
-export function removeNetworkMarkerURLs(
-  payload: NetworkPayload
-): NetworkPayload {
-  return { ...payload, URI: '', RedirectURI: '' };
-}
-
-export function removePrefMarkerPreferenceValues(
-  payload: PrefMarkerPayload
-): PrefMarkerPayload {
-  return { ...payload, prefValue: '' };
-}
-
-/**
- * Sanitize Text marker's name property for potential URLs.
- */
-export function sanitizeTextMarker(
-  payload: TextMarkerPayload
-): TextMarkerPayload {
-  return {
-    ...payload,
-    name: removeURLs(payload.name),
-  };
-}
-
-/**
- * Sanitize Extension Text marker's name property for potential add-on ids.
- */
-export function sanitizeExtensionTextMarker(
-  markerName: string,
-  payload: TextMarkerPayload
-): TextMarkerPayload {
-  if (['ExtensionParent', 'ExtensionChild'].includes(markerName)) {
-    return {
-      ...payload,
-      name: payload.name.replace(/^.*, (api_(call|event): )/, '$1'),
-    };
-  }
-
-  if (markerName === 'Extension Suspend') {
-    return {
-      ...payload,
-      name: payload.name.replace(/ by .*$/, ''),
-    };
-  }
-
-  return payload;
-}
-
-export function sanitizeFromMarkerSchema(
-  markerSchema: MarkerSchema,
-  markerPayload: MarkerPayload
-): MarkerPayload {
-  for (const { key, format } of markerSchema.fields) {
-    if (!(key in markerPayload)) {
-      continue;
-    }
-
-    // We're typing the result of the sanitization with `any` because Flow
-    // doesn't like much our enormous enum of non-exact objects that's used as
-    // MarkerPayload type, and this code is too generic for Flow in this context.
-    if (format === 'url') {
-      markerPayload = {
-        ...markerPayload,
-        [key]: removeURLs((markerPayload as any)[key]),
-      } as any;
-    } else if (format === 'file-path') {
-      markerPayload = {
-        ...markerPayload,
-        [key]: removeFilePath((markerPayload as any)[key]),
-      } as any;
-    } else if (format === 'sanitized-string') {
-      markerPayload = {
-        ...markerPayload,
-        [key]: '<sanitized>',
-      } as any;
-    }
-  }
-
-  return markerPayload;
+  return { markerPayload, shouldRemoveMarker };
 }
 
 /**
@@ -1485,10 +1555,10 @@ export function filterMarkerByDisplayLocation(
  * Compute the Screenshot image's thumbnail size.
  */
 export function computeScreenshotSize(
-  payload: { windowWidth: number; windowHeight: number },
+  windowSize: { width: number; height: number },
   maximumSize: number
 ): { readonly width: number; readonly height: number } {
-  const { windowWidth, windowHeight } = payload;
+  const { width: windowWidth, height: windowHeight } = windowSize;
 
   // Coefficient should be according to bigger side.
   const coefficient =
@@ -1583,3 +1653,112 @@ export const stringsToMarkerRegExps = (
     fieldMap,
   };
 };
+
+// In the new Log marker format, the `level` field is a string table index
+// pointing to one of these strings. Map them to the single-letter abbreviations
+// used in MOZ_LOG output (E/W/I/D/V).
+export const LOG_LEVEL_STRING_TO_LETTER: Record<string, string> = {
+  Error: 'E',
+  Warning: 'W',
+  Info: 'I',
+  Debug: 'D',
+  Verbose: 'V',
+};
+
+// Maps MOZ_LOG single-letter level abbreviations to a numeric priority
+// (lower number = higher severity) for filtering comparisons.
+export const LOG_LETTER_TO_LEVEL: Record<string, number> = {
+  E: 1,
+  W: 2,
+  I: 3,
+  D: 4,
+  V: 5,
+};
+
+/**
+ * Format an absolute timestamp (ms since epoch) as a MOZ_LOG date string.
+ * Matches the output format of mozlog: "YYYY-MM-DD HH:MM:SS.mssμs UTC"
+ */
+export function formatLogTimestamp(absoluteMs: number): string {
+  function pad(p: string | number, c: number) {
+    return String(p).padStart(c, '0');
+  }
+  const d = new Date(absoluteMs);
+  // new Date rounds down milliseconds; recover sub-millisecond precision separately.
+  // This will be imperfect because of float rounding errors but still better
+  // than not having them.
+  const ns = Math.trunc((absoluteMs - Math.trunc(absoluteMs)) * 10 ** 6);
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1, 2)}-${pad(d.getUTCDate(), 2)} ` +
+    `${pad(d.getUTCHours(), 2)}:${pad(d.getUTCMinutes(), 2)}:${pad(d.getUTCSeconds(), 2)}.` +
+    `${pad(d.getUTCMilliseconds(), 3)}${pad(ns, 6)} UTC`
+  );
+}
+
+/**
+ * Resolve a new format Log marker's message. The schema tells us whether the
+ * payload holds the message inline or as an index into the string table, which
+ * is what newer profiles do.
+ */
+export function resolveLogMarkerMessage(
+  message: string | IndexIntoStringTable,
+  stringArray: string[],
+  stringIndexMarkerFieldsByDataType: Map<string, string[]>
+): string {
+  // The casts below follow the storage layout the schema declares, which
+  // TypeScript can't verify from the payload type alone.
+  if (
+    !isStringIndexMarkerField(
+      stringIndexMarkerFieldsByDataType,
+      'Log',
+      'message'
+    )
+  ) {
+    return message as string;
+  }
+
+  return stringArray[message as IndexIntoStringTable] ?? '';
+}
+
+/**
+ * Format a Log marker payload into a MOZ_LOG canonical line.
+ *
+ * Returns null if the entry has no message content and should be skipped.
+ *
+ * Two payload formats are supported:
+ *  - New format: { message, level } where `level` is a string table index
+ *    resolving to "Error" / "Warning" / "Info" / "Debug" / "Verbose", and the
+ *    module name is taken from the marker's `name` field (also a string table
+ *    index, passed here as `moduleName`).
+ *  - Legacy format: { name, module } where `module` may include a level prefix
+ *    ("D/nsHttp") or just a bare module name ("nsHttp").
+ */
+export function formatLogStatement(
+  timestampStr: string,
+  processName: string,
+  pid: number | string,
+  threadName: string,
+  data: LogMarkerPayload,
+  moduleName: string,
+  stringArray: string[],
+  stringIndexMarkerFieldsByDataType: Map<string, string[]>
+): string | null {
+  if ('message' in data) {
+    const message = resolveLogMarkerMessage(
+      data.message,
+      stringArray,
+      stringIndexMarkerFieldsByDataType
+    );
+    if (!message) {
+      return null;
+    }
+    const levelStr = stringArray[data.level] ?? '';
+    const levelLetter = LOG_LEVEL_STRING_TO_LETTER[levelStr] ?? 'D';
+    return `${timestampStr} - [${processName} ${pid}: ${threadName}]: ${levelLetter}/${moduleName} ${message.trim()}`;
+  }
+  if (!data.name) {
+    return null;
+  }
+  const prefix = data.module.includes('/') ? '' : 'D/';
+  return `${timestampStr} - [${processName} ${pid}: ${threadName}]: ${prefix}${data.module} ${data.name.trim()}`;
+}

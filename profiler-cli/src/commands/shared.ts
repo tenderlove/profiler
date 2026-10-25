@@ -1,0 +1,240 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/**
+ * Shared option helpers for profiler-cli commands.
+ */
+
+import type { Command } from 'commander';
+import { Option } from 'commander';
+import { collectStrings } from '../utils/parse';
+import { sendCommand } from '../client';
+import { formatOutput } from '../output';
+import { CALL_TREE_SUMMARY_STRATEGIES } from 'firefox-profiler/profile-logic/profile-data';
+import type {
+  ClientCommand,
+  CallTreeSummaryStrategy,
+  CommandResult,
+  PermalinkFormat,
+} from '../protocol';
+
+/**
+ * Options shared by every command action via `addGlobalOptions`.
+ */
+export type GlobalOptions = {
+  session?: string;
+  json?: boolean;
+  permalink?: boolean;
+  shortPermalink?: boolean;
+};
+
+/** Which permalink, if any, the global flags ask for. */
+export function permalinkFormat(
+  opts: GlobalOptions
+): PermalinkFormat | undefined {
+  if (opts.shortPermalink) {
+    return 'short';
+  }
+  if (opts.permalink) {
+    return 'long';
+  }
+  return undefined;
+}
+
+/**
+ * Send a command to the daemon and print the formatted result. Centralizes the
+ * `sendCommand` + `formatOutput` tail that every command action shares, so no
+ * call site can forget to pass `opts.session` or honor `opts.json`.
+ */
+export async function runCommand(
+  sessionDir: string,
+  command: ClientCommand,
+  opts: GlobalOptions
+): Promise<string | CommandResult> {
+  const { result, permalink } = await sendCommand(
+    sessionDir,
+    command,
+    opts.session,
+    { permalink: permalinkFormat(opts) }
+  );
+  console.log(formatOutput(result, opts.json ?? false, permalink));
+  return result;
+}
+
+/**
+ * Parse a string as an integer and exit with an error if it is not a valid
+ * integer >= min. Pass a custom `msg` to override the default error message.
+ */
+export function parseIntArg(
+  flagName: string,
+  value: string,
+  min: number,
+  msg?: string
+): number {
+  const v = parseInt(value, 10);
+  if (isNaN(v) || v < min) {
+    console.error(
+      msg ??
+        `Error: ${flagName} must be a ${min <= 0 ? 'non-negative' : 'positive'} integer`
+    );
+    process.exit(1);
+  }
+  return v;
+}
+
+/**
+ * Parse a string as a float in [min, max] and exit with an error on failure.
+ */
+export function parseFloatArg(
+  flagName: string,
+  value: string,
+  min: number,
+  max: number = Infinity,
+  msg?: string
+): number {
+  const v = parseFloat(value);
+  if (isNaN(v) || v < min || v > max) {
+    console.error(
+      msg ??
+        `Error: ${flagName} must be a number between ${min} and ${max === Infinity ? '∞' : max}`
+    );
+    process.exit(1);
+  }
+  return v;
+}
+
+/**
+ * Parse a strategy name and exit with an error if it is not a valid strategy.
+ */
+export function parseStrategyArg(
+  flagName: string,
+  value: string
+): CallTreeSummaryStrategy {
+  if (!(CALL_TREE_SUMMARY_STRATEGIES as string[]).includes(value)) {
+    console.error(
+      `Error: ${flagName} must be one of: ${CALL_TREE_SUMMARY_STRATEGIES.join(', ')}`
+    );
+    process.exit(1);
+  }
+  return value as CallTreeSummaryStrategy;
+}
+
+/**
+ * As parseStrategyArg, but for the optional --strategy flag.
+ */
+export function parseOptionalStrategyArg(
+  value: string | undefined
+): CallTreeSummaryStrategy | undefined {
+  return value === undefined
+    ? undefined
+    : parseStrategyArg('--strategy', value);
+}
+
+/**
+ * Add the --strategy option to a command.
+ */
+export function addStrategyOption(cmd: Command): Command {
+  return cmd.option(
+    '--strategy <name>',
+    `Data source to summarize: ${CALL_TREE_SUMMARY_STRATEGIES.join(', ')}. Allocation strategies report bytes instead of samples.`
+  );
+}
+
+/**
+ * Returns true if the given subcommand was explicitly typed by the user.
+ * Used to decide whether to print a "other subcommands" hint after a default action.
+ *
+ * e.g. `profiler-cli session`       -> wasExplicit('session', 'list') === false
+ *      `profiler-cli session list`  -> wasExplicit('session', 'list') === true
+ */
+export function wasExplicit(parent: string, subcommand: string): boolean {
+  const args = process.argv;
+  const idx = args.lastIndexOf(parent);
+  return idx !== -1 && args[idx + 1] === subcommand;
+}
+
+/**
+ * Add the --session option to a command.
+ */
+export function addSessionOption(cmd: Command): Command {
+  return cmd.option(
+    '--session <id>',
+    'Use a specific session (default: current session)'
+  );
+}
+
+/**
+ * Add --session and --json options to a command.
+ */
+export function addGlobalOptions(cmd: Command): Command {
+  return addSessionOption(cmd)
+    .option('--json', 'Output results as JSON')
+    .option(
+      '--permalink',
+      'Also print a profiler.firefox.com URL for the view this command shows'
+    )
+    .option(
+      '--short-permalink',
+      'Like --permalink, but shortened through share.firefox.dev'
+    );
+}
+
+/**
+ * Add all ephemeral sample filter options to a command.
+ * Used by `thread samples`, `thread samples-top-down`, `thread samples-bottom-up`,
+ * `thread functions`, and `filter push`.
+ */
+export function addSampleFilterOptions(cmd: Command): Command {
+  return cmd
+    .addOption(
+      new Option(
+        '--excludes-function <f-N>',
+        'Drop samples containing this function'
+      )
+        .argParser(collectStrings)
+        .default([])
+    )
+    .addOption(
+      new Option('--merge <f-N,...>', 'Merge (remove) functions from stacks')
+        .argParser(collectStrings)
+        .default([])
+    )
+    .addOption(
+      new Option('--root-at <f-N>', 'Re-root stacks at this function')
+        .argParser(collectStrings)
+        .default([])
+    )
+    .addOption(
+      new Option(
+        '--includes-function <f-N,...>',
+        'Keep only samples whose stack contains any of these functions'
+      )
+        .argParser(collectStrings)
+        .default([])
+    )
+    .addOption(
+      new Option(
+        '--includes-prefix <f-N,...>',
+        'Keep only samples whose stack starts with this root-first sequence'
+      )
+        .argParser(collectStrings)
+        .default([])
+    )
+    .addOption(
+      new Option(
+        '--includes-suffix <f-N>',
+        'Keep only samples whose leaf frame is this function'
+      )
+        .argParser(collectStrings)
+        .default([])
+    )
+    .option(
+      '--during-marker',
+      'Keep only samples during matching markers (requires --search)'
+    )
+    .option(
+      '--outside-marker',
+      'Keep only samples outside matching markers (requires --search)'
+    );
+}

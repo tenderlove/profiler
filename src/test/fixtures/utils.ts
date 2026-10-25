@@ -18,7 +18,12 @@ import {
   getOriginAnnotationForFunc,
   createThreadFromDerivedTables,
   computeStackTableFromRawStackTable,
+  computeFrameTableFromRawFrameTable,
+  computeFuncTableFromRawFuncTable,
+  computeNativeSymbolTableFromRawNativeSymbolTable,
   computeSamplesTableFromRawSamplesTable,
+  computeJsAllocationsTableFromRawJsAllocationsTable,
+  computeNativeAllocationsTableFromRawNativeAllocationsTable,
 } from 'firefox-profiler/profile-logic/profile-data';
 import { getProfileWithDicts } from './profiles/processed-profile';
 import { StringTable } from '../../utils/string-table';
@@ -36,6 +41,7 @@ import type {
   IndexIntoCategoryList,
   SampleUnits,
   SourceTable,
+  CategoryList,
 } from 'firefox-profiler/types';
 
 import { ensureExists } from 'firefox-profiler/utils/types';
@@ -139,35 +145,60 @@ export function getMouseEvent(
 export function computeThreadFromRawThread(
   rawThread: RawThread,
   shared: RawProfileSharedData,
+  categories: CategoryList | undefined,
   sampleUnits: SampleUnits | undefined,
   referenceCPUDeltaPerMs: number,
   defaultCategory: IndexIntoCategoryList
 ): Thread {
   const stringTable = StringTable.withBackingArray(shared.stringArray);
+  const frameTable = computeFrameTableFromRawFrameTable(
+    shared.frameTable,
+    categories
+  );
+  const funcTable = computeFuncTableFromRawFuncTable(shared.funcTable);
+  const nativeSymbols = computeNativeSymbolTableFromRawNativeSymbolTable(
+    shared.nativeSymbols
+  );
   const stackTable = computeStackTableFromRawStackTable(
     shared.stackTable,
-    shared.frameTable,
+    frameTable,
+    categories,
     defaultCategory
   );
   const samples = computeSamplesTableFromRawSamplesTable(
     rawThread.samples,
+    stackTable,
     sampleUnits,
-    referenceCPUDeltaPerMs
+    referenceCPUDeltaPerMs,
+    defaultCategory
   );
   const tracedValuesBuffer = rawThread.tracedValuesBuffer
     ? base64StringToBytes(rawThread.tracedValuesBuffer)
+    : undefined;
+  const jsAllocations = rawThread.jsAllocations
+    ? computeJsAllocationsTableFromRawJsAllocationsTable(
+        rawThread.jsAllocations
+      )
+    : undefined;
+  const nativeAllocations = rawThread.nativeAllocations
+    ? computeNativeAllocationsTableFromRawNativeAllocationsTable(
+        rawThread.nativeAllocations
+      )
     : undefined;
   return createThreadFromDerivedTables(
     rawThread,
     samples,
     stackTable,
-    shared.frameTable,
-    shared.funcTable,
-    shared.nativeSymbols,
+    frameTable,
+    funcTable,
+    nativeSymbols,
     shared.resourceTable,
     stringTable,
     shared.sources,
-    tracedValuesBuffer
+    tracedValuesBuffer,
+    shared.sourceLocationTable,
+    jsAllocations,
+    nativeAllocations
   );
 }
 
@@ -338,23 +369,21 @@ export function formatStack(
     sources,
   } = thread;
   for (
-    let stackIndex: IndexIntoStackTable | null = stack;
-    stackIndex !== null;
+    let stackIndex: IndexIntoStackTable = stack;
+    stackIndex !== -1;
     stackIndex = stackTable.prefix[stackIndex]
   ) {
     const frameIndex = stackTable.frame[stackIndex];
     const funcIndex = frameTable.func[frameIndex];
-    const frameLine = frameTable.line[frameIndex];
-    const frameColumn = frameTable.column[frameIndex];
     const funcName = stringTable.getString(funcTable.name[funcIndex]);
     const origin = getOriginAnnotationForFunc(
       funcIndex,
+      frameIndex,
+      frameTable,
       funcTable,
       resourceTable,
       stringTable,
-      sources,
-      frameLine,
-      frameColumn
+      sources
     );
     lines.push(`${funcName} (${origin})`);
   }
@@ -570,6 +599,9 @@ export function fireFullKeyPress(
     enter: 13,
     escape: 27,
     ' ': 32,
+    // On a QWERTY layout '/' and '?' are the same physical key (191), '?'
+    // being Shift+'/', so they share the same keyCode.
+    '/': 191,
     '?': 191,
     a: 65,
     b: 66,
@@ -637,6 +669,26 @@ function isControlInput(element: HTMLElement): boolean {
 }
 
 /**
+ * Returns an ArrayBuffer which contains only the bytes that are covered by the
+ * Uint8Array, making a copy if needed.
+ */
+export function extractArrayBuffer(
+  bufferView: Uint8Array<ArrayBuffer>
+): ArrayBuffer {
+  if (
+    bufferView.byteOffset === 0 &&
+    bufferView.byteLength === bufferView.buffer.byteLength
+  ) {
+    return bufferView.buffer;
+  }
+
+  // There was extra data at the start or at the end. Make a copy.
+  const copy = new Uint8Array(bufferView.byteLength);
+  copy.set(bufferView);
+  return copy.buffer;
+}
+
+/**
  * Adds a source entry to the sources table and returns the index.
  * If a source with the same URL already exists, returns the existing index.
  * This is a test utility for setting up test profiles.
@@ -644,11 +696,14 @@ function isControlInput(element: HTMLElement): boolean {
 export function addSourceToTable(
   sources: SourceTable,
   urlStringIndex: number,
-  uuid: string | null = null
+  id: string | null = null,
+  startLine: number = 1,
+  startColumn: number = 1,
+  sourceMapURLStringIndex: number | null = null
 ): number {
   // Check if source already exists
   for (let i = 0; i < sources.filename.length; i++) {
-    if (sources.filename[i] === urlStringIndex && sources.uuid[i] === uuid) {
+    if (sources.filename[i] === urlStringIndex && sources.id[i] === id) {
       return i;
     }
   }
@@ -656,7 +711,11 @@ export function addSourceToTable(
   // Add new source entry
   const sourceIndex = sources.filename.length;
   sources.filename.push(urlStringIndex);
-  sources.uuid.push(uuid);
+  sources.id.push(id);
+  sources.startLine.push(startLine);
+  sources.startColumn.push(startColumn);
+  sources.sourceMapURL.push(sourceMapURLStringIndex);
+  sources.content.push(null);
   sources.length = sources.filename.length;
 
   return sourceIndex;

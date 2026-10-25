@@ -2,13 +2,33 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+.bottom-box {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-flow: row nowrap;
+}
+
+.bottom-box-fullscreen {
+  position: fixed;
+  z-index: 100;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
 .bottom-box-pane {
   --internal-sourceview-background-color: var(--grey-20);
   --internal-close-icon: url(../../../res/img/svg/close-dark.svg);
   --internal-assembly-icon: url(../../../res/img/svg/asm-icon.svg);
+  --internal-fullscreen-icon: url(../../../res/img/svg/fullscreen.svg);
+  --internal-fullscreen-exit-icon: url(../../../res/img/svg/fullscreen-exit.svg);
 
   display: flex;
-  height: 100%; /* direct child of SplitterLayout */
+  overflow: hidden;
+  min-width: 0;
+  flex: 1;
   flex-flow: column nowrap;
   color: var(--base-foreground-color);
 }
@@ -23,7 +43,7 @@
   background: var(--internal-sourceview-background-color);
 }
 
-.bottom-box .layout-splitter {
+.bottom-box .resizableWithSplitterSplitter {
   position: relative; /* containing block for absolute ::before */
   width: 1px;
   border: none;
@@ -31,7 +51,7 @@
 }
 
 /* Provide 3px extra grabbable surface on each side of the splitter */
-.bottom-box .layout-splitter::before {
+.bottom-box .resizableWithSplitterSplitter::before {
   position: absolute;
   z-index: var(--z-bottom-box);
   display: block;
@@ -44,6 +64,7 @@
   overflow: hidden;
   height: 24px;
   flex-flow: row;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--panel-border-color);
@@ -73,6 +94,8 @@
 
 .bottom-close-button,
 .bottom-assembly-button,
+.bottom-fullscreen-hide-button,
+.bottom-fullscreen-show-button,
 .bottom-prev-button,
 .bottom-next-button {
   width: 24px;
@@ -101,6 +124,19 @@
   background-image: var(--internal-assembly-icon);
 }
 
+.bottom-fullscreen-show-button {
+  background-image: var(--internal-fullscreen-icon);
+}
+
+.bottom-fullscreen-hide-button {
+  background-image: var(--internal-fullscreen-exit-icon);
+}
+
+.bottom-fullscreen-show-button,
+.bottom-fullscreen-hide-button {
+  background-size: 11px 11px;
+}
+
 .codeLoadingOverlay,
 .sourceCodeErrorOverlay,
 .assemblyCodeErrorOverlay {
@@ -118,15 +154,20 @@
   min-width: 200px;
   max-width: min(500px, 100%);
   height: min-content;
+  max-height: 90%;
   flex-flow: row;
-  align-items: center;
+  align-items: safe center;
   padding: 15px;
   border-radius: 10px;
   margin: auto;
   background-color: var(--internal-background-color);
   gap: 15px;
   inset: 0;
-  overflow-wrap: break-word;
+
+  /* `anywhere`, shrinks min-content width so the flex child can shrink and
+   * long unbreakable URLs don't overflow. */
+  overflow-wrap: anywhere;
+  overflow-y: auto;
 }
 
 /* Use ::before to add a loading spinner image */
@@ -154,6 +195,7 @@
 }
 
 .codeErrorOverlay {
+  min-width: 0;
   padding-left: 20px;
 }
 
@@ -162,6 +204,8 @@
     --internal-sourceview-background-color: var(--grey-80);
     --internal-close-icon: url(../../../res/img/svg/close-light.svg);
     --internal-assembly-icon: url(../../../res/img/svg/asm-icon-light.svg);
+    --internal-fullscreen-icon: url(../../../res/img/svg/fullscreen-light.svg);
+    --internal-fullscreen-exit-icon: url(../../../res/img/svg/fullscreen-exit-light.svg);
   }
 
   .codeLoadingOverlay,

@@ -49,6 +49,11 @@ AppViewRouter--error-from-localhost-url-safari =
     импортировать профили с локальной машины в этот браузер. Пожалуйста, откройте
     эту страницу в { -firefox-brand-name } или Chrome.
     .title = Safari не может импортировать локальные профили
+# This error message is displayed when the profile is in a newer format version
+# than this build of the Profiler is able to read.
+AppViewRouter--error-profile-version =
+    Этот профиль использует формат, который не поддерживается этой версией { -profiler-brand-name }.
+    Попробуйте обновить страницу, чтобы проверить, доступно ли обновление для { -profiler-brand-name }.
 AppViewRouter--route-not-found--home =
     .specialMessage = URL-адрес, который вы пытались открыть, не был распознан.
 
@@ -146,7 +151,7 @@ CallNodeContextMenu--expand-all = Развернуть всё
 # See: https://searchfox.org/
 CallNodeContextMenu--searchfox = Найти название функции на Searchfox
 CallNodeContextMenu--copy-function-name = Скопировать имя функции
-CallNodeContextMenu--copy-script-url = Скопировать URL сценария
+CallNodeContextMenu--copy-script-url = Копировать URL скрипта
 CallNodeContextMenu--copy-stack = Скопировать стек
 CallNodeContextMenu--show-the-function-in-devtools = Показать функцию в DevTools
 
@@ -154,11 +159,7 @@ CallNodeContextMenu--show-the-function-in-devtools = Показать функц
 ## This is the component for Call Tree panel.
 
 CallTree--tracing-ms-total = Время работы (мс)
-    .title =
-        «Общее» время выполнения включает в себя сводку всего времени, в течение которого наблюдалось нахождение этой
-        функции в стеке. Это включает в себя время, когда
-        функция фактически была запущена, и время, проведенное в вызывающих из
-        этой функции.
+    .title = «Общее» время выполнения включает в себя сводку всего времени, в течение которого наблюдалось нахождение этой функции в стеке. Это включает в себя время, когда функция фактически была запущена, и время, проведённое в вызывающих из этой функции.
 CallTree--tracing-ms-self = Собственное (мс)
     .title =
         «Собственное» время включает в себя только то время, когда функция была
@@ -166,11 +167,7 @@ CallTree--tracing-ms-self = Собственное (мс)
         то время работы «других» функций не учитывается. «Собственное» время полезно
         для понимания того, на что на самом деле было потрачено время в программе.
 CallTree--samples-total = Общее (семплы)
-    .title =
-        «Общее» количество семплов включает в себя сводку по каждому семплу, в котором
-        было обнаружено наличие этой функции в стеке. Оно включает в себя время, когда
-        функция фактически была запущена, и время, проведенное в вызывающих из этой
-        функции.
+    .title = «Общее» количество семплов включает в себя сводку по каждому семплу, в котором было обнаружено наличие этой функции в стеке. Оно включает в себя время, когда функция фактически была запущена, и время, проведённое в вызывающих из этой функции.
 CallTree--samples-self = Собственные
     .title =
         Количество «собственных» семплов включает только те семплы, в которых функция была
@@ -295,16 +292,17 @@ ErrorBoundary--report-error-to-developers-description = Пожалуйста, с
 # This is used in a call to action button, displayed inside the error box.
 ErrorBoundary--report-error-on-github = Сообщить об ошибке на GitHub
 
-## Footer Links
+## Settings Menu
+## The settings popup opened from the cog icon in the top bar.
 
-FooterLinks--legal = Юридическая информация
-FooterLinks--Privacy = Приватность
-FooterLinks--Cookies = Куки
-FooterLinks--languageSwitcher--select =
+SettingsMenu--button =
+    .title = Настройки
+SettingsMenu--docs = Документация
+SettingsMenu--legal = Юридическая информация
+SettingsMenu--privacy = Приватность
+SettingsMenu--cookies = Куки
+SettingsMenu--language-switcher =
     .title = Изменить язык
-FooterLinks--hide-button =
-    .title = Скрыть ссылки в нижнем колонтитуле
-    .aria-label = Скрыть ссылки в нижнем колонтитуле
 
 ## FullTimeline
 ## The timeline component of the full view in the analysis UI at the top of the
@@ -350,8 +348,8 @@ Home--record-instructions =
     Чтобы начать профилирование, нажмите кнопку профилирования или используйте горячие
     клавиши. Значок синий, когда профиль записывает.
     Нажмите <kbd>Запись</kbd>, чтобы загрузить данные на profiler.firefox.com.
-Home--instructions-content =
-    Для записи профилей производительности требуется <a>{ -firefox-brand-name }</a>.
+Home--instructions-content2 =
+    Для записи профилей производительности требуется <a>{ -firefox-brand-name } для ПК</a>.
     Однако существующие профили можно просматривать в любом современном браузере.
 Home--fenix-instructions-directly =
     { -firefox-android-brand-name } может быть профилирован непосредственно на этом устройстве. Для
@@ -389,14 +387,17 @@ Home--chrome-extension-recording-instructions =
 ## IdleSearchField
 ## The component that is used for all the search inputs in the application.
 
-IdleSearchField--search-input =
-    .placeholder = Введите условия фильтра
+# `/` here overrides Firefox's Type Ahead Find shortcut, which would
+# otherwise trigger an unhelpful find bar on top of the profiler UI.
+# The shortcut itself is not localizable.
+IdleSearchField--search-input2 =
+    .placeholder = Введите условия фильтра (/)
 
 ## JsTracerSettings
 ## JSTracer is an experimental feature and it's currently disabled. See Bug 1565788.
 
 JsTracerSettings--show-only-self-time = Показывать только собственное время
-    .title = Показывать только время, проведенное в узле вызова, игнорируя его дочерние элементы.
+    .title = Показывать только время, проведённое в узле вызова, игнорируя его дочерние элементы.
 
 ## ListOfPublishedProfiles
 ## This is the component that displays all the profiles the user has uploaded.
@@ -504,8 +505,8 @@ MarkerTable--details = Подробности
 # Variables:
 #   $filter (String) - Search string that will be used to filter the markers.
 MarkerTooltip--filter-button-tooltip =
-    .title = Показать только подходящие маркеры: «{ $filter }»
     .aria-label = Показать только подходящие маркеры: «{ $filter }»
+    .title = Показать только подходящие маркеры: «{ $filter }»
 
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
@@ -514,14 +515,15 @@ MenuButtons--index--metaInfo-button =
     .label = Информация о профиле
 MenuButtons--index--full-view = Полный обзор
 MenuButtons--index--cancel-upload = Отменить выгрузку
-MenuButtons--index--share-upload =
-    .label = Выгрузить локальный профиль
-MenuButtons--index--share-re-upload =
-    .label = Повторно выгрузить
+MenuButtons--index--save =
+    .label = Сохранить…
+MenuButtons--index--share =
+    .label = Поделиться…
+MenuButtons--index--reshare =
+    .label = Поделиться снова…
 MenuButtons--index--share-error-uploading =
     .label = Ошибка выгрузки
 MenuButtons--index--revert = Вернуться к исходному профилю
-MenuButtons--index--docs = Документация
 MenuButtons--permalink--button =
     .label = Постоянная ссылка
 
@@ -539,6 +541,28 @@ MenuButtons--metaInfo--resymbolicate-profile = Ресимволизироват�
 MenuButtons--metaInfo--symbolicate-profile = Символизировать профиль
 MenuButtons--metaInfo--attempting-resymbolicate = Попытка пересимволизировать профиль
 MenuButtons--metaInfo--currently-symbolicating = Символизированный в настоящий момент профиль
+MenuButtons--metaInfo--source-maps = Карты исходного кода:
+# The trailing ellipsis indicates that clicking the button opens a file picker.
+MenuButtons--metaInfo--apply-source-map = Применить карту исходного кода…
+    .title = Загрузить с диска .map-файл, чтобы восстановить в минифицированной сборке JavaScript исходные имена функций и их расположение в коде.
+# Shown when the uploaded map could match more than one source and the user has
+# to choose which one it applies to.
+MenuButtons--metaInfo--source-map-choose-bundle = Выберите сборку, к которой относится эта карта исходного кода:
+# Button to confirm the chosen source and apply the source map to it.
+MenuButtons--metaInfo--source-map-apply = Применить
+# Button to dismiss the source chooser without symbolicating.
+MenuButtons--metaInfo--source-map-cancel = Отмена
+# Shown after symbolication finished and original sources were resolved.
+# Variable:
+#   $filename (String) - The bundle source the source map was applied to.
+MenuButtons--metaInfo--source-map-success = Для { $filename } определены исходные файлы.
+# Shown after symbolication finished but no stack positions matched the map.
+# Variable:
+#   $filename (String) - The bundle source the source map was applied to.
+MenuButtons--metaInfo--source-map-no-match = В { $filename } не найдено позиций в стеке, соответствующих этой карте исходного кода.
+MenuButtons--metaInfo--source-map-error-invalid = Выбранный файл не является корректной картой исходного кода.
+MenuButtons--metaInfo--source-map-error-no-eligible = В этом профиле нет сборок JavaScript с URL карт исходного кода.
+MenuButtons--metaInfo--source-map-error-failed = Не удалось применить эту карту исходного кода к профилю.
 MenuButtons--metaInfo--cpu-model = Модель процессора:
 MenuButtons--metaInfo--cpu-cores = Ядер процессора:
 MenuButtons--metaInfo--main-memory = Основная память:
@@ -675,9 +699,15 @@ MenuButtons--publish--renderCheckbox-label-preference = Включая знач�
 MenuButtons--publish--renderCheckbox-label-private-browsing = Включая данные из окон приватного просмотра
 MenuButtons--publish--renderCheckbox-label-private-browsing-warning-image =
     .title = Этот профиль содержит личные данные просмотра
-MenuButtons--publish--reupload-performance-profile = Повторно загрузить профиль производительности
+MenuButtons--publish--renderCheckbox-label-argument-values = Включая значения аргументов функции трассировки выполнения JavaScript
+MenuButtons--publish--renderCheckbox-label-argument-values-warning-image =
+    .title = Этот профиль содержит значения аргументов функции, записанные со страницы, которые могут включать в себя личные данные
 MenuButtons--publish--share-performance-profile = Поделиться профилем производительности
+MenuButtons--publish--reshare-performance-profile = Повторно поделиться профилем производительности
+MenuButtons--publish--save-performance-profile = Сохранить профиль производительности
+MenuButtons--publish--local-profile-description = Этот профиль не был загружен и будет потерян, когда вы закроете эту вкладку. Чтобы сохранить его, сохраните его на свой компьютер или загрузите через Поделиться.
 MenuButtons--publish--info-description = Загрузите свой профиль и сделайте его доступным для всех, у кого есть ссылка.
+MenuButtons--publish--download-info-description = Сохранить этот профиль как файл на вашем компьютере.
 MenuButtons--publish--info-description-default = По умолчанию ваши личные данные удаляются.
 MenuButtons--publish--info-description-firefox-nightly2 = Этот профиль принадлежит { -firefox-nightly-brand-name }, поэтому по умолчанию в него включена большая часть информации.
 MenuButtons--publish--include-additional-data = Включая дополнительные данные, которые могут быть идентифицированы
@@ -686,7 +716,7 @@ MenuButtons--publish--upload-title = Выгрузка профиля…
 MenuButtons--publish--cancel-upload = Отменить выгрузку
 MenuButtons--publish--message-something-went-wrong = Ой, что-то пошло не так при загрузке профиля.
 MenuButtons--publish--message-try-again = Попробовать снова
-MenuButtons--publish--download = Скачать
+MenuButtons--publish--save = Сохранить
 MenuButtons--publish--compressing = Сжатие…
 MenuButtons--publish--error-while-compressing = Ошибка при сжатии, попробуйте снять некоторые флажки, чтобы уменьшить размер профиля.
 
@@ -721,8 +751,8 @@ PanelSearch--search-field-hint = Знаете ли вы, что можно ис�
 ProfileName--edit-profile-name-button =
     .title = Изменить имя профиля
 ProfileName--edit-profile-name-input =
-    .title = Изменить имя профиля
     .aria-label = Имя профиля
+    .title = Изменить имя профиля
 
 ## Profile Delete Button
 
@@ -743,7 +773,7 @@ ProfileDeletePanel--delete-error = При удалении этого профи
 # This is the title of the dialog
 # Variables:
 #   $profileName (string) - Some string that identifies the profile
-ProfileDeletePanel--dialog-title = Удалить { $profileName }
+ProfileDeletePanel--dialog-title = Удалить «{ $profileName }»
 ProfileDeletePanel--dialog-confirmation-question =
     Вы уверены, что хотите удалить загруженные данные для этого профиля? Ссылки,
     которые ранее были общими, больше не будут работать.
@@ -802,8 +832,8 @@ ServiceWorkerManager--updated-while-not-ready =
     версия приложения. Вы можете столкнуться с неисправностями.
 ServiceWorkerManager--new-version-is-ready = Новая версия приложения скачана и готова к использованию.
 ServiceWorkerManager--hide-notice-button =
-    .title = Скрыть уведомление о перезагрузке
     .aria-label = Скрыть уведомление о перезагрузке
+    .title = Скрыть уведомление о перезагрузке
 
 ## StackSettings
 ## This is the settings component that is used in Call Tree, Flame Graph and Stack
@@ -832,6 +862,8 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Сайты осв
     .title = Суммировать, используя байты освобожденной памяти, по сайту, где была освобождена память
 StackSettings--invert-call-stack = Инвертировать стек вызовов
     .title = Сортировать по времени, потраченному на вызов узла, игнорируя его дочерние элементы.
+StackSettings--include-idle-samples = Включить замеры неактивности
+    .title = Снимите флажок, чтобы скрыть семплы, конечный фрейм которых находится в категории неактивных.
 StackSettings--show-user-timing = Показать время пользователя
 StackSettings--use-stack-chart-same-widths = Использовать одинаковую ширину для всех стеков
 StackSettings--panel-search =
@@ -898,9 +930,26 @@ TrackNameButton--hide-process =
 ## the UI. To learn more about it, visit:
 ## https://profiler.firefox.com/docs/#/./memory-allocations?id=memory-track
 
-TrackMemoryGraph--relative-memory-at-this-time = относительная память в это время
-TrackMemoryGraph--memory-range-in-graph = диапазон памяти на графике
-TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample = размещения и освобождения с момента предыдущей выборки
+# Variables:
+#   $value (String) - the relative memory at this time (e.g. "5MB")
+TrackMemoryGraph--relative-memory-at-this-time2 = { $value }
+    .label = относительная память на данный момент
+# Variables:
+#   $value (String) - the memory range across the graph (e.g. "5MB")
+TrackMemoryGraph--memory-range-in-graph2 = { $value }
+    .label = диапазон памяти на графике
+# Variables:
+#   $value (String) - count of allocations and deallocations since the previous sample
+TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample2 = { $value }
+    .label = распределения и отмены по сравнению с предыдущим семплом
+
+## TrackProcessCPUGraph
+## This is used to show the CPU usage of a process over time in the timeline.
+
+# Variables:
+#   $value (String) - the CPU usage at this sample (e.g. "50%")
+TrackProcessCPUGraph--cpu = { $value }
+    .label = ЦПУ
 
 ## TrackPower
 ## This is used to show the power used by the CPU and other chips in a computer,
@@ -946,6 +995,11 @@ TrackPower--tooltip-average-power-watt = { $value } Вт
 # Variables:
 #   $value (String) - the power value at this location
 TrackPower--tooltip-average-power-milliwatt = { $value } мВт
+    .label = Средняя мощность при текущем выборе
+# This is used in the tooltip when the power value uses the microwatt unit.
+# Variables:
+#   $value (String) - the power value at this location
+TrackPower--tooltip-average-power-microwatt = { $value } мВт
     .label = Средняя мощность при текущем выборе
 # This is used in the tooltip when the energy used in the current range uses the
 # kilowatt-hour unit.
@@ -1158,6 +1212,12 @@ BottomBox--assembly-code-not-available-title = Ассемблерный код �
 # Elements:
 #   <a>link text</a> - A link to the github issue about supported scenarios.
 BottomBox--assembly-code-not-available-text = См. <a>проблему #4520</a>, чтобы узнать о поддерживаемых сценариях и запланированных улучшениях.
+# The toggle button for making the bottom box fullscreen.
+BottomBox--hide-fullscreen =
+    .title = Выйти из полноэкранного режима
+# The toggle button for making the bottom box fullscreen.
+BottomBox--show-fullscreen =
+    .title = Полноэкранный режим
 SourceView--close-button =
     .title = Закрыть исходный вид
 

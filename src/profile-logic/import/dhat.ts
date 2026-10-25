@@ -6,14 +6,15 @@ import type {
   Profile,
   Pid,
   Bytes,
-  IndexIntoFuncTable,
   IndexIntoStackTable,
 } from 'firefox-profiler/types';
+import { FrameFlag } from 'firefox-profiler/types';
 
 import {
+  finishRawUnbalancedNativeAllocationsTableBuilder,
   getEmptyProfile,
   getEmptyThread,
-  getEmptyUnbalancedNativeAllocationsTable,
+  getEmptyRawUnbalancedNativeAllocationsTable,
 } from 'firefox-profiler/profile-logic/data-structures';
 
 import { GlobalDataCollector } from 'firefox-profiler/profile-logic/global-data-collector';
@@ -155,7 +156,7 @@ type WriteCount = number;
 
 /**
  * The dhat convertor converts to the processed profile format, rather than to the Gecko
- * format, as it needs the UnbalancedNativeAllocationsTable type, which is unavailable
+ * format, as it needs the RawUnbalancedNativeAllocationsTable type, which is unavailable
  * in the Gecko format. In the Gecko format, that data comes in the form of markers, which
  * would be awkard to target.
  */
@@ -184,12 +185,11 @@ export function attemptToConvertDhat(json: unknown): Profile | null {
   profile.meta.product = dhat.cmd + ' (dhat)';
   profile.meta.importedFrom = `dhat`;
   const globalDataCollector = new GlobalDataCollector();
+  const stackTable = globalDataCollector.getStackTableBuilder();
+  const frameTable = globalDataCollector.getFrameTable();
   const stringTable = globalDataCollector.getStringTable();
 
-  const allocationsTable = getEmptyUnbalancedNativeAllocationsTable();
-  const { funcTable, stackTable, frameTable } = profile.shared;
-
-  const funcKeyToFuncIndex = new Map<string, IndexIntoFuncTable>();
+  const allocationsTable = getEmptyRawUnbalancedNativeAllocationsTable();
 
   // dhat profiles do no support categories. Fill the category and subcategory information
   // with 0s.
@@ -197,24 +197,27 @@ export function attemptToConvertDhat(json: unknown): Profile | null {
   const otherSubCategory = 0;
 
   // Insert a root function that is the command that was run.
-  funcTable.name.push(stringTable.indexForString(dhat.cmd));
-  funcTable.isJS.push(false);
-  funcTable.relevantForJS.push(false);
-  funcTable.resource.push(-1);
-  funcTable.source.push(null);
-  funcTable.lineNumber.push(null);
-  funcTable.columnNumber.push(null);
-  const rootFuncIndex = funcTable.length++;
+  const rootFuncIndex = globalDataCollector.indexForFunc(
+    stringTable.indexForString(dhat.cmd),
+    false,
+    false,
+    -1,
+    null,
+    null,
+    null
+  );
 
-  frameTable.address.push(-1);
-  frameTable.line.push(null);
-  frameTable.column.push(null);
+  frameTable.flags.push(FrameFlag.HasCategory);
+  frameTable.address.push(0);
+  frameTable.line.push(0);
+  frameTable.column.push(0);
   frameTable.category.push(otherCategory);
   frameTable.subcategory.push(otherSubCategory);
-  frameTable.innerWindowID.push(null);
-  frameTable.nativeSymbol.push(null);
-  frameTable.inlineDepth.push(0);
+  frameTable.innerWindowID.push(0);
+  frameTable.lib.push(0);
+  frameTable.nativeSymbol.push(0);
   frameTable.func.push(rootFuncIndex);
+  frameTable.originalLocation.push(0);
   const rootFrameIndex = frameTable.length++;
 
   stackTable.frame.push(rootFrameIndex);
@@ -224,7 +227,6 @@ export function attemptToConvertDhat(json: unknown): Profile | null {
   // Convert the frame table.
   for (let funcName of dhat.ftbl) {
     let fileName = dhat.cmd;
-    let address = -1;
     let line = null;
     let column = null;
 
@@ -253,7 +255,10 @@ export function attemptToConvertDhat(json: unknown): Profile | null {
     // Example input: "0x58E297: marian::io::binary::loadItems(void const*) (binary.cpp:74)"
     // Capture groups:   111111  222222222222222222222222222222222222222222  3333333333 44
     if (result) {
-      address = parseInt(result[1], 16);
+      // We ignore capture group 1, the address: dhat gives us absolute process
+      // addresses and no library mappings, so there is nothing to make the
+      // address relative to. Without a lib the address is unusable (the
+      // assembly view needs a lib and a native symbol), so we don't store it.
       funcName = result[2];
       fileName = result[3];
       line = result[4] ? Number(result[4]) : null;
@@ -262,30 +267,34 @@ export function attemptToConvertDhat(json: unknown): Profile | null {
     // If the above regex doesn't match, just use the raw funcName, without additional
     // information.
 
-    const funcKey = `${funcName} ${fileName}`;
+    const funcIndex = globalDataCollector.indexForFunc(
+      stringTable.indexForString(funcName),
+      false,
+      false,
+      -1,
+      globalDataCollector.indexForSource(null, fileName),
+      line,
+      column
+    );
 
-    let funcIndex = funcKeyToFuncIndex.get(funcKey);
-    if (funcIndex === undefined) {
-      funcTable.name.push(stringTable.indexForString(funcName));
-      funcTable.isJS.push(false);
-      funcTable.relevantForJS.push(false);
-      funcTable.resource.push(-1);
-      funcTable.source.push(globalDataCollector.indexForSource(null, fileName));
-      funcTable.lineNumber.push(line);
-      funcTable.columnNumber.push(column);
-      funcIndex = funcTable.length++;
-      funcKeyToFuncIndex.set(funcKey, funcIndex);
+    let flags = FrameFlag.HasCategory;
+    if (line !== null) {
+      flags |= FrameFlag.HasLine;
     }
-
-    frameTable.address.push(address);
-    frameTable.line.push(line);
-    frameTable.column.push(column);
+    if (column !== null) {
+      flags |= FrameFlag.HasColumn;
+    }
+    frameTable.flags.push(flags);
+    frameTable.address.push(0);
+    frameTable.line.push(line ?? 0);
+    frameTable.column.push(column ?? 0);
     frameTable.category.push(otherCategory);
     frameTable.subcategory.push(otherSubCategory);
-    frameTable.innerWindowID.push(null);
-    frameTable.nativeSymbol.push(null);
-    frameTable.inlineDepth.push(0);
+    frameTable.innerWindowID.push(0);
+    frameTable.lib.push(0);
+    frameTable.nativeSymbol.push(0);
     frameTable.func.push(funcIndex);
+    frameTable.originalLocation.push(0);
     frameTable.length++;
   }
 
@@ -376,13 +385,15 @@ export function attemptToConvertDhat(json: unknown): Profile | null {
     thread.tid = i;
     thread.name = name;
 
-    thread.nativeAllocations = {
-      time: allocationsTable.time.slice(),
-      stack: allocationsTable.stack.slice(),
-      weight,
-      weightType: 'bytes',
-      length: allocationsTable.length,
-    };
+    thread.nativeAllocations = finishRawUnbalancedNativeAllocationsTableBuilder(
+      {
+        time: allocationsTable.time.slice(),
+        stack: allocationsTable.stack.slice(),
+        weight,
+        weightType: 'bytes',
+        length: allocationsTable.length,
+      }
+    );
 
     return thread;
   });

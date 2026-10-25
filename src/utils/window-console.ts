@@ -9,6 +9,7 @@ import type {
   Profile,
   Thread,
   Marker,
+  LogMarkerPayload,
 } from 'firefox-profiler/types';
 import { selectorsForConsole } from 'firefox-profiler/selectors';
 import actions from 'firefox-profiler/actions';
@@ -21,7 +22,13 @@ import {
   getThemePreference,
   setThemePreference,
 } from 'firefox-profiler/utils/dark-mode';
+import { printSliceTree } from 'firefox-profiler/utils/slice-tree';
 import type { CallTree } from 'firefox-profiler/profile-logic/call-tree';
+import {
+  formatLogTimestamp,
+  formatLogStatement,
+} from 'firefox-profiler/profile-logic/marker-data';
+import { computeStringIndexMarkerFieldsByDataType } from 'firefox-profiler/profile-logic/marker-schema';
 
 // Despite providing a good libdef for Object.defineProperty, Flow still
 // special-cases the `value` property: if it's missing it throws an error. Using
@@ -52,6 +59,7 @@ export type ExtraPropertiesOnWindowForConsole = {
   ) => Promise<void>;
   extractGeckoLogs: () => string;
   totalMarkerDuration: (markers: any) => number;
+  activity: () => void;
   shortenUrl: typeof shortenUrl;
   getState: GetState;
   selectors: typeof selectorsForConsole;
@@ -180,14 +188,10 @@ export function addDataToWindowObject(
   };
 
   target.toggleTimelineType = function (timelineType?: string) {
-    if (
-      timelineType !== 'cpu-category' &&
-      timelineType !== 'category' &&
-      timelineType !== 'stack'
-    ) {
+    if (timelineType !== 'cpu-category' && timelineType !== 'stack') {
       console.log(stripIndent`
         ❗ The timeline type "${timelineType}" is unknown.
-        💡 Valid types are: "cpu-category", "category", or "stack".
+        💡 Valid types are: "cpu-category" or "stack".
         Please try again 😊
       `);
       return;
@@ -274,24 +278,8 @@ export function addDataToWindowObject(
   };
 
   // This function extracts MOZ_LOGs saved as markers in a Firefox profile,
-  // using the MOZ_LOG canonical format. All logs are saved as a debug log
-  // because the log level information isn't saved in these markers.
+  // using the MOZ_LOG canonical format.
   target.extractGeckoLogs = function () {
-    function pad(p: string | number, c: number) {
-      return String(p).padStart(c, '0');
-    }
-
-    // This transforms a timestamp to a string as output by mozlog usually.
-    function d2s(ts: number) {
-      const d = new Date(ts);
-      // new Date rounds down the timestamp (in milliseconds) to the lower integer,
-      // let's get the microseconds and nanoseconds differently.
-      // This will be imperfect because of float rounding errors but still better
-      // than not having them.
-      const ns = Math.trunc((ts - Math.trunc(ts)) * 10 ** 6);
-      return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1, 2)}-${pad(d.getUTCDate(), 2)} ${pad(d.getUTCHours(), 2)}:${pad(d.getUTCMinutes(), 2)}:${pad(d.getUTCSeconds(), 2)}.${pad(d.getUTCMilliseconds(), 3)}${pad(ns, 6)} UTC`;
-    }
-
     const logs = [];
 
     // This algorithm loops over the raw marker table instead of using the
@@ -300,35 +288,43 @@ export function addDataToWindowObject(
     const profile = selectorsForConsole.profile.getProfile(getState());
     const range =
       selectorsForConsole.profile.getPreviewSelectionRange(getState());
+    // The schema tells us which payload fields hold string table indexes.
+    const stringIndexMarkerFieldsByDataType =
+      computeStringIndexMarkerFieldsByDataType(
+        selectorsForConsole.profile.getMarkerSchema(getState())
+      );
 
     for (const thread of profile.threads) {
       const { markers } = thread;
+
       for (let i = 0; i < markers.length; i++) {
         const startTime = markers.startTime[i];
-        // Note that Log markers are instant markers, so they only have a start time.
         if (
           startTime !== null &&
-          markers.data[i] &&
           markers.data[i]?.type === 'Log' &&
           startTime >= range.start &&
           startTime <= range.end
         ) {
-          const data = markers.data[i];
-          const markerStartTime = markers.startTime[i];
-          if (
-            data &&
-            markerStartTime !== null &&
-            (data as any).module &&
-            (data as any).name
-          ) {
-            const strTimestamp = d2s(profile.meta.startTime + markerStartTime);
-            const processName = thread.processName ?? 'Unknown Process';
-
-            // The log module may contain the log level for profiles captured after bug 1995503.
-            // If the log module does not contain /, we fake it to D/module
-            const logModule = (data as any).module;
-            const prefix = logModule.includes('/') ? '' : 'D/';
-            const statement = `${strTimestamp} - [${processName} ${thread.pid}: ${thread.name}]: ${prefix}${logModule} ${(data as any).name.trim()}`;
+          const data = markers.data[i] as LogMarkerPayload;
+          const absoluteTs = profile.meta.startTime + startTime;
+          const strTimestamp = formatLogTimestamp(absoluteTs);
+          const processName = thread.processName ?? 'Unknown Process';
+          const stringArray = profile.shared.stringArray;
+          // For the new format the module name lives in the marker's name field.
+          // For the legacy format it is embedded in data.module; formatLogStatement
+          // handles that internally, so this value is not used in that case.
+          const moduleName = stringArray[markers.name[i]];
+          const statement = formatLogStatement(
+            strTimestamp,
+            processName,
+            thread.pid,
+            thread.name,
+            data,
+            moduleName,
+            stringArray,
+            stringIndexMarkerFieldsByDataType
+          );
+          if (statement !== null) {
             logs.push(statement);
           }
         }
@@ -358,6 +354,14 @@ export function addDataToWindowObject(
 
     console.log(`Total marker duration: ${formatTimestamp(totalDuration)}`);
     return totalDuration;
+  };
+
+  target.activity = function () {
+    const slices =
+      selectorsForConsole.selectedThread.getActivitySlices(getState());
+    if (slices) {
+      console.log(printSliceTree(slices).join('\n'));
+    }
   };
 
   target.shortenUrl = shortenUrl;
@@ -421,7 +425,7 @@ export function logFriendlyPreamble() {
       %cwindow.actions%c - All the actions that can be dispatched to change the state.
       %cwindow.experimental%c - The object that holds flags of all the experimental features.
       %cwindow.togglePseudoLocalization%c - Enable pseudo localizations by passing "accented" or "bidi" to this function, or disable using no parameters.
-      %cwindow.toggleTimelineType%c - Toggle timeline graph type by passing "cpu-category", "category", or "stack".
+      %cwindow.toggleTimelineType%c - Toggle timeline graph type by passing "cpu-category" or "stack".
       %cwindow.toggleDarkMode%c - Cycle through theme preferences: system, light, dark.
       %cwindow.retrieveRawProfileDataFromBrowser%c - Retrieve the profile attached to the current tab and returns it. Use "await" to call it, and use saveToDisk to save it.
       %cwindow.extractGeckoLogs%c - Retrieve recorded logs in the current range, using the MOZ_LOG format. Use with "copy" or "saveToDisk".
@@ -431,7 +435,7 @@ export function logFriendlyPreamble() {
       %chttps://github.com/firefox-devtools/profiler/blob/main/docs-developer/processed-profile-format.md%c
 
       The CallTree class's source code is available here:
-      %chttps://github.com/firefox-devtools/profiler/blob/main/src/profile-logic/call-tree.js%c
+      %chttps://github.com/firefox-devtools/profiler/blob/main/src/profile-logic/call-tree.ts%c
     `,
     // "The following profiler..."
     intro,
@@ -490,7 +494,7 @@ export function logFriendlyPreamble() {
     // "processed-profile-format.md"
     link,
     reset,
-    // "call-tree.js"
+    // "call-tree.ts"
     link,
     reset
   );

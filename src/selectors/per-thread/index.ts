@@ -32,6 +32,7 @@ import type {
   ThreadsKey,
   State,
 } from 'firefox-profiler/types';
+import { FuncFlag } from 'firefox-profiler/types';
 
 import type { TimingsForPath } from '../../profile-logic/profile-data';
 
@@ -217,7 +218,7 @@ export const selectedNodeSelectors: NodeSelectors = (() => {
       }
 
       const funcIndex = ProfileData.getLeafFuncIndex(selectedPath);
-      return funcTable.isJS[funcIndex];
+      return (funcTable.flags[funcIndex] & FuncFlag.IsJS) !== 0;
     }
   );
 
@@ -225,30 +226,41 @@ export const selectedNodeSelectors: NodeSelectors = (() => {
     selectedThreadSelectors.getSelectedCallNodePath,
     selectedThreadSelectors.getFilteredThread,
     ProfileSelectors.getSourceTable,
-    (selectedPath, { stringTable, funcTable, resourceTable }, sources) => {
+    (
+      selectedPath,
+      {
+        stringTable,
+        frameTable,
+        funcTable,
+        resourceTable,
+        sourceLocationTable,
+      },
+      sources
+    ) => {
       if (!selectedPath.length) {
         return '';
       }
 
       return ProfileData.getOriginAnnotationForFunc(
         ProfileData.getLeafFuncIndex(selectedPath),
+        null,
+        frameTable,
         funcTable,
         resourceTable,
         stringTable,
-        sources
+        sources,
+        sourceLocationTable
       );
     }
   );
 
   const getTimingsForSidebar: Selector<TimingsForPath> = createSelector(
-    selectedThreadSelectors.getSelectedCallNodePath,
-    selectedThreadSelectors.getCallNodeInfo,
-    selectedThreadSelectors.getThread,
-    selectedThreadSelectors.getPreviewFilteredCtssSampleIndexOffset,
     ProfileSelectors.getCategories,
     selectedThreadSelectors.getPreviewFilteredCtssSamples,
-    selectedThreadSelectors.getUnfilteredCtssSamples,
-    ProfileData.getTimingsForPath
+    selectedThreadSelectors.getPreviewFilteredCtssSampleCategoriesAndSubcategories,
+    selectedThreadSelectors.getPreviewFilteredCtssSampleRelations,
+    selectedThreadSelectors.getSelectedCallNodeIsInvertedRoot,
+    ProfileData.getCallNodeTimings
   );
 
   return {

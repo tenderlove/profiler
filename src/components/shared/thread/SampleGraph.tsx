@@ -24,24 +24,21 @@ import type {
   CategoryList,
   IndexIntoSamplesTable,
   Milliseconds,
-  SelectedState,
   CssPixels,
-  TimelineType,
   ImplementationFilter,
 } from 'firefox-profiler/types';
+import type { SampleRelations } from 'firefox-profiler/profile-logic/profile-data';
 import type { SizeProps } from 'firefox-profiler/components/shared/WithSize';
-import type { CpuRatioInTimeRange } from './ActivityGraphFills';
 import { lightDark } from 'firefox-profiler/utils/dark-mode';
 
 export type HoveredPixelState = {
   readonly sample: IndexIntoSamplesTable | null;
-  readonly cpuRatioInTimeRange: CpuRatioInTimeRange | null;
 };
 
 type Props = {
   readonly className: string;
   readonly thread: Thread;
-  readonly samplesSelectedStates: null | SelectedState[];
+  readonly sampleRelations: SampleRelations;
   readonly interval: Milliseconds;
   readonly rangeStart: Milliseconds;
   readonly rangeEnd: Milliseconds;
@@ -51,7 +48,6 @@ type Props = {
     sampleIndex: IndexIntoSamplesTable | null
   ) => void;
   readonly trackName: string;
-  readonly timelineType: TimelineType;
   readonly implementationFilter: ImplementationFilter;
   readonly zeroAt: Milliseconds;
   readonly profileTimelineUnit: string;
@@ -66,7 +62,7 @@ type State = {
 type CanvasProps = {
   readonly className: string;
   readonly thread: Thread;
-  readonly samplesSelectedStates: null | SelectedState[];
+  readonly sampleRelations: SampleRelations;
   readonly interval: Milliseconds;
   readonly rangeStart: Milliseconds;
   readonly rangeEnd: Milliseconds;
@@ -81,8 +77,9 @@ type CanvasProps = {
  */
 class ThreadSampleGraphCanvas extends React.PureComponent<CanvasProps> {
   _canvas: null | HTMLCanvasElement = null;
-  _takeCanvasRef = (canvas: HTMLCanvasElement | null) =>
-    (this._canvas = canvas);
+  _takeCanvasRef = (canvas: HTMLCanvasElement | null) => {
+    this._canvas = canvas;
+  };
   _canvasState: { renderScheduled: boolean; inView: boolean } = {
     renderScheduled: false,
     inView: false,
@@ -140,7 +137,7 @@ class ThreadSampleGraphCanvas extends React.PureComponent<CanvasProps> {
       interval,
       rangeStart,
       rangeEnd,
-      samplesSelectedStates,
+      sampleRelations,
       categories,
       width,
       height,
@@ -175,6 +172,8 @@ class ThreadSampleGraphCanvas extends React.PureComponent<CanvasProps> {
       firstDrawnSampleIndex
     );
 
+    const idleCategoryIndex = categories.findIndex((c) => c.name === 'Idle');
+
     // Do one pass over the samples array to gather the samples we want to draw.
     const regularSamples: number[] = [];
     const idleSamples: number[] = [];
@@ -188,22 +187,17 @@ class ThreadSampleGraphCanvas extends React.PureComponent<CanvasProps> {
       if (sampleTime < nextMinTime) {
         continue;
       }
-      const stackIndex = thread.samples.stack[i];
-      if (stackIndex === null) {
+      if (sampleRelations.isFilteredOut(i)) {
         continue;
       }
       const xPos =
         (sampleTime - rangeStart) * xPixelsPerMs - drawnSampleWidth / 2;
       let samplesBucket;
-      if (
-        samplesSelectedStates !== null &&
-        samplesSelectedStates[i] === 'SELECTED'
-      ) {
+      if (sampleRelations.contributesToTotal(i)) {
         samplesBucket = highlightedSamples;
       } else {
-        const categoryIndex = thread.stackTable.category[stackIndex];
-        const category = categories[categoryIndex];
-        if (category.name === 'Idle') {
+        const categoryIndex = thread.samples.category[i];
+        if (categoryIndex === idleCategoryIndex) {
           samplesBucket = idleSamples;
         } else {
           samplesBucket = regularSamples;
@@ -254,7 +248,7 @@ class ThreadSampleGraphCanvas extends React.PureComponent<CanvasProps> {
 }
 
 export class ThreadSampleGraphImpl extends PureComponent<Props, State> {
-  override state = {
+  override state: State = {
     hoveredPixelState: null,
     mouseX: 0,
     mouseY: 0,
@@ -335,7 +329,6 @@ export class ThreadSampleGraphImpl extends PureComponent<Props, State> {
 
     return {
       sample: sampleIndex,
-      cpuRatioInTimeRange: null,
     };
   }
 
@@ -343,14 +336,13 @@ export class ThreadSampleGraphImpl extends PureComponent<Props, State> {
     const {
       className,
       trackName,
-      timelineType,
       categories,
       implementationFilter,
       thread,
       interval,
       rangeStart,
       rangeEnd,
-      samplesSelectedStates,
+      sampleRelations,
       width,
       height,
       zeroAt,
@@ -372,7 +364,7 @@ export class ThreadSampleGraphImpl extends PureComponent<Props, State> {
           thread={thread}
           rangeStart={rangeStart}
           rangeEnd={rangeEnd}
-          samplesSelectedStates={samplesSelectedStates}
+          sampleRelations={sampleRelations}
           categories={categories}
           width={width}
           height={height}
@@ -381,12 +373,8 @@ export class ThreadSampleGraphImpl extends PureComponent<Props, State> {
         {hoveredPixelState === null ? null : (
           <Tooltip mouseX={mouseX} mouseY={mouseY}>
             <SampleTooltipContents
-              sampleIndex={(hoveredPixelState as HoveredPixelState).sample}
-              cpuRatioInTimeRange={
-                timelineType === 'cpu-category'
-                  ? (hoveredPixelState as HoveredPixelState).cpuRatioInTimeRange
-                  : null
-              }
+              sampleIndex={hoveredPixelState.sample}
+              cpuRatioInTimeRange={null}
               rangeFilteredThread={thread}
               categories={categories}
               implementationFilter={implementationFilter}

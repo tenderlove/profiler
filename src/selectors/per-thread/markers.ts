@@ -21,6 +21,7 @@ import type {
   MarkerIndex,
   Marker,
   MarkerSchema,
+  MarkerDisplayLocation,
   MarkerTiming,
   MarkerTimingAndBuckets,
   DerivedMarkerInfo,
@@ -492,29 +493,40 @@ export function getMarkerSelectorsPerThread(
     );
 
   /**
-   * This returns only memory markers.
+   * Returns markers for an arbitrary schema location. The inner selectors are
+   * memoized per location so repeated lookups with the same location reuse a
+   * single reselect instance.
    */
-  const getTimelineMemoryMarkerIndexes: Selector<MarkerIndex[]> =
-    createSelector(
-      getMarkerGetter,
-      getCommittedRangeFilteredMarkerIndexes,
-      ProfileSelectors.getMarkerSchema,
-      ProfileSelectors.getMarkerSchemaByName,
-      () => 'timeline-memory' as const,
-      MarkerData.filterMarkerByDisplayLocation
-    );
+  const _timelineMarkerIndexesSelectorsBySchemaLocation: Map<
+    MarkerDisplayLocation,
+    Selector<MarkerIndex[]>
+  > = new Map();
+  const getTimelineMarkerIndexesBySchemaLocation = (
+    schemaLocation: MarkerDisplayLocation
+  ): Selector<MarkerIndex[]> => {
+    let selector =
+      _timelineMarkerIndexesSelectorsBySchemaLocation.get(schemaLocation);
+    if (selector === undefined) {
+      selector = createSelector(
+        getMarkerGetter,
+        getCommittedRangeFilteredMarkerIndexes,
+        ProfileSelectors.getMarkerSchema,
+        ProfileSelectors.getMarkerSchemaByName,
+        () => schemaLocation,
+        MarkerData.filterMarkerByDisplayLocation
+      );
+      _timelineMarkerIndexesSelectorsBySchemaLocation.set(
+        schemaLocation,
+        selector
+      );
+    }
+    return selector;
+  };
 
-  /**
-   * This returns only IPC markers.
-   */
-  const getTimelineIPCMarkerIndexes: Selector<MarkerIndex[]> = createSelector(
-    getMarkerGetter,
-    getCommittedRangeFilteredMarkerIndexes,
-    ProfileSelectors.getMarkerSchema,
-    ProfileSelectors.getMarkerSchemaByName,
-    () => 'timeline-ipc' as const,
-    MarkerData.filterMarkerByDisplayLocation
-  );
+  const getTimelineMemoryMarkerIndexes =
+    getTimelineMarkerIndexesBySchemaLocation('timeline-memory');
+  const getTimelineIPCMarkerIndexes =
+    getTimelineMarkerIndexesBySchemaLocation('timeline-ipc');
 
   /**
    * This organizes the network markers in rows so that they're nicely displayed
@@ -538,14 +550,29 @@ export function getMarkerSelectorsPerThread(
     MarkerTimingLogic.getMarkerTiming
   );
 
+  const getRangeFilteredScreenshotMarkerIndexes =
+    getTimelineMarkerIndexesBySchemaLocation('timeline-screenshots');
+
   /**
-   * This groups screenshot markers by their window ID.
+   * This groups screenshot markers by their name.
    */
-  const getRangeFilteredScreenshotsById: Selector<Map<string, Marker[]>> =
+  const getRangeFilteredScreenshotsByName: Selector<Map<string, Marker[]>> =
     createSelector(
       getMarkerGetter,
-      getCommittedRangeFilteredMarkerIndexes,
-      MarkerData.groupScreenshotsById
+      getRangeFilteredScreenshotMarkerIndexes,
+      (getMarker, markerIndexes) => {
+        const screenshotsByName = new Map<string, Marker[]>();
+        for (const markerIndex of markerIndexes) {
+          const marker = getMarker(markerIndex);
+          let screenshots = screenshotsByName.get(marker.name);
+          if (screenshots === undefined) {
+            screenshots = [];
+            screenshotsByName.set(marker.name, screenshots);
+          }
+          screenshots.push(marker);
+        }
+        return screenshotsByName;
+      }
     );
 
   /**
@@ -783,8 +810,9 @@ export function getMarkerSelectorsPerThread(
     getTimelineFileIoMarkerIndexes,
     getTimelineMemoryMarkerIndexes,
     getTimelineIPCMarkerIndexes,
+    getTimelineMarkerIndexesBySchemaLocation,
     getNetworkTrackTiming,
-    getRangeFilteredScreenshotsById,
+    getRangeFilteredScreenshotsByName,
     getSearchFilteredMarkerIndexes,
     getPreviewFilteredMarkerIndexes,
     getSelectedMarkerIndex,

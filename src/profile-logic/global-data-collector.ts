@@ -4,13 +4,17 @@
 
 import { StringTable } from '../utils/string-table';
 import {
-  getEmptyFrameTable,
-  getEmptyFuncTable,
-  getEmptyNativeSymbolTable,
-  getEmptyRawStackTable,
+  finishRawFrameTableBuilder,
+  finishRawFuncTableBuilder,
+  finishRawNativeSymbolTableBuilder,
+  finishRawStackTableBuilder,
+  getRawFrameTableBuilder,
+  getRawFuncTableBuilder,
+  getRawNativeSymbolTableBuilder,
   getEmptyResourceTable,
   getEmptySourceTable,
-  resourceTypes,
+  getEmptySourceLocationTable,
+  getRawStackTableBuilder,
 } from './data-structures';
 
 import type {
@@ -21,11 +25,7 @@ import type {
   IndexIntoSourceTable,
   RawProfileSharedData,
   SourceTable,
-  FrameTable,
-  RawStackTable,
-  FuncTable,
   ResourceTable,
-  NativeSymbolTable,
   IndexIntoResourceTable,
   IndexIntoFuncTable,
   ExtensionTable,
@@ -33,6 +33,13 @@ import type {
   Address,
   Bytes,
 } from 'firefox-profiler/types';
+import { ResourceType, FuncFlag } from 'firefox-profiler/types';
+import type {
+  RawFrameTableBuilder,
+  RawFuncTableBuilder,
+  RawNativeSymbolTableBuilder,
+  RawStackTableBuilder,
+} from './data-structures';
 
 /**
  * GlobalDataCollector collects data which is global in the processed profile
@@ -48,20 +55,19 @@ export class GlobalDataCollector {
   _stringArray: string[] = [];
   _stringTable: StringTable = StringTable.withBackingArray(this._stringArray);
   _sources: SourceTable = getEmptySourceTable();
-  _frameTable: FrameTable = getEmptyFrameTable();
-  _stackTable: RawStackTable = getEmptyRawStackTable();
-  _funcTable: FuncTable = getEmptyFuncTable();
+  _frameTable: RawFrameTableBuilder = getRawFrameTableBuilder();
+  _stackTableBuilder: RawStackTableBuilder = getRawStackTableBuilder();
+  _funcTable: RawFuncTableBuilder = getRawFuncTableBuilder();
   _resourceTable: ResourceTable = getEmptyResourceTable();
-  _nativeSymbols: NativeSymbolTable = getEmptyNativeSymbolTable();
+  _nativeSymbols: RawNativeSymbolTableBuilder =
+    getRawNativeSymbolTableBuilder();
   _funcKeyToFuncIndex: Map<string, IndexIntoFuncTable> = new Map();
   _nativeSymbolKeyToNativeSymbolIndex: Map<string, IndexIntoNativeSymbolTable> =
-    new Map();
-  _libIndexToResourceIndex: Map<IndexIntoLibs, IndexIntoResourceTable> =
     new Map();
   _libNameToResourceIndex: Map<IndexIntoStringTable, IndexIntoResourceTable> =
     new Map();
   _originToResourceIndex: Map<string, IndexIntoResourceTable> = new Map();
-  _uuidToSourceIndex: Map<string, IndexIntoSourceTable> = new Map();
+  _idToSourceIndex: Map<string, IndexIntoSourceTable> = new Map();
   _filenameToSourceIndex: Map<IndexIntoStringTable, IndexIntoSourceTable> =
     new Map();
 
@@ -100,14 +106,33 @@ export class GlobalDataCollector {
     const funcKey = `${name}-${isJS}-${relevantForJS}-${resource}-${source}-${lineNumber}-${columnNumber}`;
     let funcIndex = this._funcKeyToFuncIndex.get(funcKey);
     if (funcIndex === undefined) {
+      let flags = 0;
+      if (isJS) {
+        flags |= FuncFlag.IsJS;
+      }
+      if (relevantForJS) {
+        flags |= FuncFlag.RelevantForJS;
+      }
+      if (resource !== -1) {
+        flags |= FuncFlag.HasResource;
+      }
+      if (source !== null) {
+        flags |= FuncFlag.HasSource;
+      }
+      if (lineNumber !== null) {
+        flags |= FuncFlag.HasLine;
+      }
+      if (columnNumber !== null) {
+        flags |= FuncFlag.HasColumn;
+      }
       funcIndex = this._funcTable.length++;
+      this._funcTable.flags[funcIndex] = flags;
       this._funcTable.name[funcIndex] = name;
-      this._funcTable.isJS[funcIndex] = isJS;
-      this._funcTable.relevantForJS[funcIndex] = relevantForJS;
-      this._funcTable.resource[funcIndex] = resource;
-      this._funcTable.source[funcIndex] = source;
-      this._funcTable.lineNumber[funcIndex] = lineNumber;
-      this._funcTable.columnNumber[funcIndex] = columnNumber;
+      this._funcTable.resource[funcIndex] = resource === -1 ? 0 : resource;
+      this._funcTable.source[funcIndex] = source ?? 0;
+      this._funcTable.lineNumber[funcIndex] = lineNumber ?? 0;
+      this._funcTable.columnNumber[funcIndex] = columnNumber ?? 0;
+      this._funcTable.originalLocation[funcIndex] = 0;
       this._funcKeyToFuncIndex.set(funcKey, funcIndex);
     }
     return funcIndex;
@@ -115,13 +140,19 @@ export class GlobalDataCollector {
 
   // Return the global index for this source, adding it to the global list if
   // necessary.
-  indexForSource(uuid: string | null, filename: string): IndexIntoSourceTable {
+  indexForSource(
+    id: string | null,
+    filename: string,
+    startLine: number = 1,
+    startColumn: number = 1,
+    sourceMapURL: string | null = null
+  ): IndexIntoSourceTable {
     let index: IndexIntoSourceTable | undefined;
 
-    if (uuid !== null) {
-      index = this._uuidToSourceIndex.get(uuid);
+    if (id !== null) {
+      index = this._idToSourceIndex.get(id);
     } else {
-      // For null UUIDs, use filename-based lookup
+      // For null IDs, use filename-based lookup.
       const filenameIndex = this._stringTable.indexForString(filename);
       index = this._filenameToSourceIndex.get(filenameIndex);
     }
@@ -129,12 +160,20 @@ export class GlobalDataCollector {
     if (index === undefined) {
       index = this._sources.length;
       const filenameIndex = this._stringTable.indexForString(filename);
-      this._sources.uuid[index] = uuid;
+      const sourceMapURLIndex =
+        sourceMapURL !== null
+          ? this._stringTable.indexForString(sourceMapURL)
+          : null;
+      this._sources.id[index] = id;
       this._sources.filename[index] = filenameIndex;
+      this._sources.startLine[index] = startLine;
+      this._sources.startColumn[index] = startColumn;
+      this._sources.sourceMapURL[index] = sourceMapURLIndex;
+      this._sources.content[index] = null;
       this._sources.length++;
 
-      if (uuid !== null) {
-        this._uuidToSourceIndex.set(uuid, index);
+      if (id !== null) {
+        this._idToSourceIndex.set(id, index);
       } else {
         this._filenameToSourceIndex.set(filenameIndex, index);
       }
@@ -159,11 +198,10 @@ export class GlobalDataCollector {
 
         const idIndex = this._stringTable.indexForString(extensions.id[i]);
 
-        resourceTable.lib[resourceIndex] = null;
         resourceTable.name[resourceIndex] =
           this._stringTable.indexForString(name);
         resourceTable.host[resourceIndex] = idIndex;
-        resourceTable.type[resourceIndex] = resourceTypes.addon;
+        resourceTable.type[resourceIndex] = ResourceType.Addon;
       }
     }
   }
@@ -203,44 +241,23 @@ export class GlobalDataCollector {
     this._originToResourceIndex.set(origin, resourceIndex);
     if (host) {
       // This is a webhost URL.
-      resourceTable.lib[resourceIndex] = null;
       resourceTable.name[resourceIndex] =
         this._stringTable.indexForString(origin);
       resourceTable.host[resourceIndex] =
         this._stringTable.indexForString(host);
-      resourceTable.type[resourceIndex] = resourceTypes.webhost;
+      resourceTable.type[resourceIndex] = ResourceType.Webhost;
     } else {
       // This is a URL, but it doesn't point to something on the web, e.g. a
       // chrome url.
-      resourceTable.lib[resourceIndex] = null;
       resourceTable.name[resourceIndex] =
         this._stringTable.indexForString(scriptURI);
       resourceTable.host[resourceIndex] = null;
-      resourceTable.type[resourceIndex] = resourceTypes.url;
+      resourceTable.type[resourceIndex] = ResourceType.Url;
     }
     return resourceIndex;
   }
 
-  indexForLibResource(libIndex: IndexIntoLibs): IndexIntoResourceTable {
-    let resourceIndex = this._libIndexToResourceIndex.get(libIndex);
-    if (resourceIndex !== undefined) {
-      return resourceIndex;
-    }
-
-    const resourceTable = this._resourceTable;
-
-    resourceIndex = this._resourceTable.length++;
-    this._libIndexToResourceIndex.set(libIndex, resourceIndex);
-    resourceTable.lib[resourceIndex] = libIndex;
-    resourceTable.name[resourceIndex] = this._stringTable.indexForString(
-      this._libs[libIndex].name
-    );
-    resourceTable.host[resourceIndex] = null;
-    resourceTable.type[resourceIndex] = resourceTypes.library;
-    return resourceIndex;
-  }
-
-  indexForNameOnlyLibResource(
+  indexForLibResourceByName(
     libNameStringIndex: IndexIntoStringTable
   ): IndexIntoResourceTable {
     let resourceIndex = this._libNameToResourceIndex.get(libNameStringIndex);
@@ -252,11 +269,16 @@ export class GlobalDataCollector {
 
     resourceIndex = this._resourceTable.length++;
     this._libNameToResourceIndex.set(libNameStringIndex, resourceIndex);
-    resourceTable.lib[resourceIndex] = null;
     resourceTable.name[resourceIndex] = libNameStringIndex;
     resourceTable.host[resourceIndex] = null;
-    resourceTable.type[resourceIndex] = resourceTypes.library;
+    resourceTable.type[resourceIndex] = ResourceType.Library;
     return resourceIndex;
+  }
+
+  indexForLibResourceByLib(libIndex: IndexIntoLibs): IndexIntoResourceTable {
+    return this.indexForLibResourceByName(
+      this._stringTable.indexForString(this._libs[libIndex].name)
+    );
   }
 
   indexForNativeSymbol(
@@ -272,7 +294,7 @@ export class GlobalDataCollector {
       this._nativeSymbols.libIndex[nativeSymbolIndex] = libIndex;
       this._nativeSymbols.address[nativeSymbolIndex] = address;
       this._nativeSymbols.name[nativeSymbolIndex] = name;
-      this._nativeSymbols.functionSize[nativeSymbolIndex] = functionSize;
+      this._nativeSymbols.functionSize[nativeSymbolIndex] = functionSize ?? -1;
       this._nativeSymbolKeyToNativeSymbolIndex.set(key, nativeSymbolIndex);
     }
     return nativeSymbolIndex;
@@ -282,25 +304,26 @@ export class GlobalDataCollector {
     return this._stringTable;
   }
 
-  getFrameTable(): FrameTable {
+  getFrameTable(): RawFrameTableBuilder {
     return this._frameTable;
   }
 
-  getStackTable(): RawStackTable {
-    return this._stackTable;
+  getStackTableBuilder(): RawStackTableBuilder {
+    return this._stackTableBuilder;
   }
 
   // Package up all de-duplicated global tables so that they can be embedded in
   // the profile.
   finish(): { libs: Lib[]; shared: RawProfileSharedData } {
     const shared: RawProfileSharedData = {
-      stackTable: this._stackTable,
-      frameTable: this._frameTable,
-      funcTable: this._funcTable,
+      stackTable: finishRawStackTableBuilder(this._stackTableBuilder),
+      frameTable: finishRawFrameTableBuilder(this._frameTable),
+      funcTable: finishRawFuncTableBuilder(this._funcTable),
       resourceTable: this._resourceTable,
-      nativeSymbols: this._nativeSymbols,
+      nativeSymbols: finishRawNativeSymbolTableBuilder(this._nativeSymbols),
       stringArray: this._stringArray,
       sources: this._sources,
+      sourceLocationTable: getEmptySourceLocationTable(),
     };
 
     return { libs: this._libs, shared };
